@@ -187,6 +187,7 @@ async function logout() {
 
 .logo {
     height: 72px;
+    width: 90%
 }
 
 .menu-title {
