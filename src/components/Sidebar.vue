@@ -110,7 +110,7 @@ async function logout() {
     } catch (e) {
         console.warn("Logout cleanup failed:", e);
     } finally {
-        window.location.href = "/login";
+        window.location.href = "/";
     }
 }
 </script>

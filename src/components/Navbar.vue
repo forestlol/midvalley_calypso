@@ -10,9 +10,9 @@
             <button class="header-icon" @click="toggleFullScreen" title="Fullscreen">
                 <i class="fas fa-expand"></i>
             </button>
-            <button class="header-icon" @click="toggleTheme" title="Toggle theme">
+            <!-- <button class="header-icon" @click="toggleTheme" title="Toggle theme">
                 <i :class="isDarkMode ? 'fas fa-sun' : 'fas fa-moon'"></i>
-            </button>
+            </button> -->
             <button class="header-icon user-icon" title="Account">
                 <i class="fas fa-user"></i>
             </button>
