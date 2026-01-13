@@ -63,7 +63,7 @@ const ACCOUNTS = [
     },
     {
         username: "user",
-        password: "user",
+        password: "admin",
         role: "normal_user",
         siteId: "MIDVALLEY",
         tenantName: "BOOKSTORE" // assigned tenant for now
