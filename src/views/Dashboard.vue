@@ -14,8 +14,8 @@
                 <div class="value">{{ store.gatewaysResolved?.length ?? 0 }}</div>
             </div>
             <div class="kpi">
-                <div class="label">Water Meters</div>
-                <div class="value">{{ waterMeterCount }}</div>
+                <div class="label">Water Devices</div>
+                <div class="value">{{ waterDevices.length }}</div>
             </div>
             <div class="kpi">
                 <div class="label">Gas Meters</div>
@@ -23,13 +23,16 @@
             </div>
         </div>
 
-
         <!-- TWO-COLUMN CHARTS -->
         <div class="charts">
             <!-- WATER (LEFT) -->
             <section class="card">
                 <div class="header">
-                    <div class="title">Water Consumption</div>
+                    <div class="title">
+                        Water Consumption
+                        <span v-if="waterApiLoading"
+                            style="font-size: 12px; color: #8a94a6; margin-left: 8px">(syncing…)</span>
+                    </div>
 
                     <div class="actions">
                         <button class="btn" @click="printPage">Print</button>
@@ -38,7 +41,7 @@
                     </div>
                 </div>
 
-                <!-- FILTERS -->
+                <!-- FILTERS (Tenant added back as placeholder; does not affect API) -->
                 <div class="filters">
                     <div class="filter">
                         <div class="filterLabel">Tenant</div>
@@ -50,11 +53,10 @@
 
                     <div class="filter">
                         <div class="filterLabel">Gateway</div>
-                        <select v-model="waterGateway" class="input"
-                            :disabled="isNormalUser && gatewayOptionsWater.length <= 1">
-                            <option value="">All Gateways</option>
-                            <option v-for="g in gatewayOptionsWater" :key="g.gateway_id" :value="g.gateway_id">
-                                {{ g.gateway_id }}
+                        <select v-model="waterDeviceId" class="input">
+                            <option value="" disabled>Select gateway/device</option>
+                            <option v-for="d in waterDevices" :key="d.device_id" :value="d.device_id">
+                                {{ d.device_id }} ({{ d.device_name }})
                             </option>
                         </select>
                     </div>
@@ -62,6 +64,7 @@
                     <div class="filter">
                         <div class="filterLabel">Mode</div>
                         <select v-model="waterMode" class="input">
+                            <option value="hourly">Hourly</option>
                             <option value="daily">Daily</option>
                             <option value="weekly">Weekly</option>
                             <option value="monthly">Monthly</option>
@@ -70,7 +73,8 @@
 
                     <div class="filter">
                         <div class="filterLabel">Period</div>
-                        <input v-if="waterMode === 'daily'" v-model="waterDate" type="date" class="input" />
+                        <input v-if="waterMode === 'hourly' || waterMode === 'daily'" v-model="waterDate" type="date"
+                            class="input" />
                         <input v-else-if="waterMode === 'weekly'" v-model="waterWeek" type="week" class="input" />
                         <input v-else v-model="waterMonth" type="month" class="input" />
                     </div>
@@ -78,6 +82,11 @@
 
                 <!-- SECTION KPIs -->
                 <div class="sectionKpis">
+                    <div class="skpi">
+                        <div class="label">Hourly</div>
+                        <div class="value">{{ waterKpiHourly }} <span class="unit">m³</span></div>
+                        <div class="sub">{{ waterDate }}</div>
+                    </div>
                     <div class="skpi">
                         <div class="label">Daily</div>
                         <div class="value">{{ waterKpiDaily }} <span class="unit">m³</span></div>
@@ -87,11 +96,6 @@
                         <div class="label">Weekly</div>
                         <div class="value">{{ waterKpiWeekly }} <span class="unit">m³</span></div>
                         <div class="sub">{{ waterWeekRangeLabel }}</div>
-                    </div>
-                    <div class="skpi">
-                        <div class="label">Monthly</div>
-                        <div class="value">{{ waterKpiMonthly }} <span class="unit">m³</span></div>
-                        <div class="sub">{{ waterMonth }}</div>
                     </div>
                 </div>
 
@@ -187,20 +191,23 @@ import { exportToCsv } from "../utils/exportCsv";
 import { useAuth } from "../stores/auth";
 
 /** ---- auth (role-based) ---- **/
-const { userRole, siteId, tenantName } = useAuth(); // rename if your store differs
+const { userRole, siteId, tenantName } = useAuth();
 const role = computed(() => userRole?.value || "normal_user");
 const isSuperAdmin = computed(() => role.value === "super_admin");
 const isSiteAdmin = computed(() => role.value === "site_admin");
 const isNormalUser = computed(() => role.value === "normal_user");
-const lockedTenant = computed(() => (isNormalUser.value ? (tenantName?.value || "BOOKSTORE") : ""));
+const lockedTenant = computed(() => (isNormalUser.value ? tenantName?.value || "BOOKSTORE" : ""));
 
-/** ---- date helpers ---- **/
-function r1(n) { return Math.round(Number(n) * 10) / 10; }
+/** ---- rounding ---- **/
+function r1(n) {
+    return Math.round(Number(n) * 10) / 10;
+}
 
+/** ---- ISO helpers ---- **/
 function startOfWeekISO(dateStr) {
     const d = new Date(dateStr);
     const day = d.getDay();
-    const diff = (day === 0 ? -6 : 1) - day;
+    const diff = (day === 0 ? -6 : 1) - day; // to Monday
     d.setDate(d.getDate() + diff);
     return d.toISOString().slice(0, 10);
 }
@@ -219,108 +226,143 @@ function dateRangeISO(start, end) {
     }
     return out;
 }
-function weeksOfMonthISO(dateStr) {
-    const d = new Date(dateStr);
-    const y = d.getFullYear();
-    const m = d.getMonth();
-    const first = new Date(y, m, 1);
-    const last = new Date(y, m + 1, 0);
 
-    const weeks = [];
-    let cur = startOfWeekISO(first.toISOString().slice(0, 10));
-    while (new Date(cur) <= last) {
-        const start = cur;
-        const end = endOfWeekISO(cur);
-        weeks.push({ start, end });
-        const next = new Date(cur);
-        next.setDate(next.getDate() + 7);
-        cur = next.toISOString().slice(0, 10);
-    }
-    return weeks;
+/** ✅ Correct ISO week -> Monday */
+function isoWeekToMonday(weekVal) {
+    const [yStr, wStr] = weekVal.split("-W");
+    const year = Number(yStr);
+    const week = Number(wStr);
+
+    const jan4 = new Date(Date.UTC(year, 0, 4));
+    const jan4Day = jan4.getUTCDay() || 7; // Mon=1..Sun=7
+
+    const week1Monday = new Date(jan4);
+    week1Monday.setUTCDate(jan4.getUTCDate() - (jan4Day - 1));
+
+    const targetMonday = new Date(week1Monday);
+    targetMonday.setUTCDate(week1Monday.getUTCDate() + (week - 1) * 7);
+
+    return targetMonday.toISOString().slice(0, 10);
 }
-function weekValueToRefDate(weekVal) {
-    const [y, w] = weekVal.split("-W");
-    const d = new Date(Number(y), 0, 1 + (Number(w) - 1) * 7);
-    return d.toISOString().slice(0, 10);
-}
-function monthValueToRefDate(monthVal) {
+
+function monthStartISO(monthVal) {
     return `${monthVal}-01`;
+}
+function monthEndISO(monthVal) {
+    const [y, m] = monthVal.split("-").map(Number);
+    const last = new Date(Date.UTC(y, m, 0)); // last day of month
+    return last.toISOString().slice(0, 10);
+}
+function pad2(n) {
+    return String(n).padStart(2, "0");
 }
 
 /** ---- store ---- **/
 const store = useSiteStore();
 
-onMounted(async () => {
-    await store.load();
-
-    // ✅ Apply role defaults AFTER dataset loads
-    applyRoleDefaults();
-
-    buildWaterChart();
-    buildGasChart();
-});
-
-const meterDaily = computed(() => store.raw?.meter_daily || []);
-const waterMeterCount = computed(() => store.meters?.filter(m => m.meter_type === "water").length ?? 0);
-const gasMeterCount = computed(() => store.meters?.filter(m => m.meter_type === "gas").length ?? 0);
-
-/** ---- options filtered by role ---- **/
+/** ---- shared tenant options (placeholder for water too) ---- **/
 const tenantOptions = computed(() => {
     if (isNormalUser.value) return [lockedTenant.value];
     return store.tenants || [];
 });
 
-function gatewayIdsForTenant(tenant) {
-    // Look into meter_daily rows to find which gateways belong to this tenant.
-    const set = new Set();
-    for (const r of meterDaily.value) {
-        if (!r) continue;
-        if (tenant && r.tenant !== tenant) continue;
-        if (r.gateway_id) set.add(r.gateway_id);
-    }
-    return set;
+/** ---------------------------
+ * WATER: devices + daily API
+ * --------------------------**/
+const DEVICES_URL = "https://midvalley-devices.rshare.io/devices?limit=1000&skip=0";
+const WATER_DAILY_BASE = "http://localhost:8003/daily";
+
+const waterApiLoading = ref(false);
+const waterDevices = ref([]);
+const waterDeviceId = ref("");
+
+// ✅ Tenant placeholder state (does not affect API)
+const waterTenant = ref("");
+
+const WATER_FETCH_LIMIT = 1000;
+const waterDailyCache = new Map();
+
+async function fetchWaterDaily(deviceId, startDay, endDay, limit = WATER_FETCH_LIMIT, sort = "desc") {
+    const key = `${deviceId}|${startDay}|${endDay}|${limit}|${sort}`;
+    if (waterDailyCache.has(key)) return waterDailyCache.get(key);
+
+    const url = `${WATER_DAILY_BASE}/${encodeURIComponent(deviceId)}?start_day=${encodeURIComponent(
+        startDay
+    )}&end_day=${encodeURIComponent(endDay)}&limit=${encodeURIComponent(limit)}&sort=${encodeURIComponent(sort)}`;
+
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+
+    const arr = Array.isArray(data) ? data : [];
+    waterDailyCache.set(key, arr);
+    return arr;
 }
 
-const gatewayOptionsWater = computed(() => {
-    // derive gateway ids from meter_daily, filtered by tenant + meter_type
-    const t = isNormalUser.value ? lockedTenant.value : (waterTenant.value || "");
-    const set = new Set();
+async function loadWaterDevices() {
+    waterApiLoading.value = true;
+    try {
+        const res = await fetch(DEVICES_URL);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        waterDevices.value = Array.isArray(data) ? data : [];
 
-    for (const r of meterDaily.value) {
-        if (!r) continue;
-        if (r.meter_type !== "water") continue;
-        if (t && r.tenant !== t) continue;
-        if (r.gateway_id) set.add(r.gateway_id);
+        if (!waterDeviceId.value && waterDevices.value.length) {
+            waterDeviceId.value = waterDevices.value[0].device_id;
+        }
+    } catch (e) {
+        console.error("loadWaterDevices failed:", e);
+        waterDevices.value = [];
+    } finally {
+        waterApiLoading.value = false;
+    }
+}
+
+/** ---- convert readings to usage ---- **/
+function dailyUsageFromReadings(readings) {
+    if (!Array.isArray(readings) || readings.length === 0) return 0;
+
+    let min = Infinity;
+    let max = -Infinity;
+
+    for (const r of readings) {
+        const v = Number(r?.dispNum);
+        if (!Number.isFinite(v)) continue;
+        if (v < min) min = v;
+        if (v > max) max = v;
     }
 
-    // return as array of { gateway_id } like your template expects
-    return Array.from(set).sort().map(gateway_id => ({ gateway_id }));
-});
+    if (!Number.isFinite(min) || !Number.isFinite(max)) return 0;
+    return r1(max - min);
+}
 
-const gatewayOptionsGas = computed(() => {
-    const t = isNormalUser.value ? lockedTenant.value : (gasTenant.value || "");
-    const set = new Set();
+function hourlyUsageBuckets(readings) {
+    const buckets = Array.from({ length: 24 }, () => ({ min: Infinity, max: -Infinity }));
 
-    for (const r of meterDaily.value) {
-        if (!r) continue;
-        if (r.meter_type !== "gas") continue;
-        if (t && r.tenant !== t) continue;
-        if (r.gateway_id) set.add(r.gateway_id);
+    for (const r of readings || []) {
+        const t = String(r?.t || "");
+        const hour = Number(t.slice(0, 2));
+        const v = Number(r?.dispNum);
+        if (!Number.isFinite(hour) || hour < 0 || hour > 23) continue;
+        if (!Number.isFinite(v)) continue;
+
+        buckets[hour].min = Math.min(buckets[hour].min, v);
+        buckets[hour].max = Math.max(buckets[hour].max, v);
     }
 
-    return Array.from(set).sort().map(gateway_id => ({ gateway_id }));
-});
+    return buckets.map((b) => {
+        if (!Number.isFinite(b.min) || !Number.isFinite(b.max)) return 0;
+        return r1(b.max - b.min);
+    });
+}
 
-
-/** ---- water state ---- **/
+/** ---- WATER state ---- **/
 const waterMode = ref("weekly");
-const waterTenant = ref("");
-const waterGateway = ref("");
-const waterDate = ref("2025-11-01");
-const waterWeek = ref("2025-W45");
-const waterMonth = ref("2025-11");
+const waterDate = ref("2026-01-16");
+const waterWeek = ref("2026-W03");
+const waterMonth = ref("2026-01");
 
-/** ---- gas state ---- **/
+/** ---- GAS state (existing dataset) ---- **/
 const gasMode = ref("weekly");
 const gasTenant = ref("");
 const gasGateway = ref("");
@@ -330,32 +372,169 @@ const gasMonth = ref("2025-11");
 
 /** ---- role defaults ---- **/
 function applyRoleDefaults() {
-    // Default date bounds from meta if available
-    if (store.meta?.start_date) {
-        waterDate.value = store.meta.start_date;
-        gasDate.value = store.meta.start_date;
-    }
-    if (store.meta?.default_week) {
-        waterWeek.value = store.meta.default_week;
-        gasWeek.value = store.meta.default_week;
-    }
-    if (store.meta?.default_month) {
-        waterMonth.value = store.meta.default_month;
-        gasMonth.value = store.meta.default_month;
-    }
+    if (store.meta?.start_date) gasDate.value = store.meta.start_date;
+    if (store.meta?.default_week) gasWeek.value = store.meta.default_week;
+    if (store.meta?.default_month) gasMonth.value = store.meta.default_month;
 
-    // Normal user: lock tenant + auto pick gateway (optional)
     if (isNormalUser.value) {
-        waterTenant.value = lockedTenant.value;
         gasTenant.value = lockedTenant.value;
-
-        // ✅ default = All Gateways
-        waterGateway.value = "";
         gasGateway.value = "";
+
+        // ✅ tenant placeholder for water too (like before)
+        waterTenant.value = lockedTenant.value;
+    }
+}
+
+/** ---- store computed (gas) ---- **/
+const meterDailyGas = computed(() => store.raw?.meter_daily || []);
+const gasMeterCount = computed(() => store.meters?.filter((m) => m.meter_type === "gas").length ?? 0);
+
+const gatewayOptionsGas = computed(() => {
+    const t = isNormalUser.value ? lockedTenant.value : gasTenant.value || "";
+    const set = new Set();
+
+    for (const r of meterDailyGas.value) {
+        if (!r) continue;
+        if (r.meter_type !== "gas") continue;
+        if (t && r.tenant !== t) continue;
+        if (r.gateway_id) set.add(r.gateway_id);
     }
 
+    return Array.from(set).sort().map((gateway_id) => ({ gateway_id }));
+});
 
+/** ---- filtering + aggregation (gas only) ---- **/
+function filterRowsGas({ utility, tenant, gateway, dates }) {
+    return meterDailyGas.value.filter((r) => {
+        if (!r) return false;
+        if (utility && r.meter_type !== utility) return false;
+
+        const enforcedTenant = isNormalUser.value ? lockedTenant.value : "";
+        const effectiveTenant = enforcedTenant || tenant;
+
+        if (effectiveTenant && r.tenant !== effectiveTenant) return false;
+        if (gateway && r.gateway_id !== gateway) return false;
+        if (dates && !dates.has(r.date)) return false;
+
+        return true;
+    });
 }
+
+function sumConsumption(rows) {
+    let t = 0;
+    for (const r of rows) t += Number(r.consumption || 0);
+    return r1(t);
+}
+
+/** ---- KPI labels ---- **/
+const waterWeekRangeLabel = computed(() => {
+    const start = isoWeekToMonday(waterWeek.value);
+    const end = endOfWeekISO(start);
+    return `${start} → ${end}`;
+});
+const gasWeekRangeLabel = computed(() => {
+    const start = isoWeekToMonday(gasWeek.value);
+    const end = endOfWeekISO(start);
+    return `${start} → ${end}`;
+});
+
+/** ---- WATER KPI (API) ---- **/
+async function getWaterDailyUsage(deviceId, day) {
+    if (!deviceId || !day) return 0;
+    const arr = await fetchWaterDaily(deviceId, day, day);
+    const row = arr?.find((x) => x?.day === day) || arr?.[0];
+    return dailyUsageFromReadings(row?.readings || []);
+}
+
+const waterKpiDaily = ref(0);
+const waterKpiWeekly = ref(0);
+const waterKpiHourly = ref(0);
+
+async function refreshWaterKpis() {
+    try {
+        if (!waterDeviceId.value) {
+            waterKpiDaily.value = 0;
+            waterKpiWeekly.value = 0;
+            waterKpiHourly.value = 0;
+            return;
+        }
+
+        waterKpiDaily.value = await getWaterDailyUsage(waterDeviceId.value, waterDate.value);
+
+        // hourly KPI (sum buckets)
+        {
+            const arr = await fetchWaterDaily(waterDeviceId.value, waterDate.value, waterDate.value);
+            const row = arr?.find((x) => x?.day === waterDate.value) || arr?.[0];
+            const buckets = hourlyUsageBuckets(row?.readings || []);
+            waterKpiHourly.value = r1(buckets.reduce((a, b) => a + Number(b || 0), 0));
+        }
+
+        // weekly KPI (one range call)
+        {
+            const start = isoWeekToMonday(waterWeek.value);
+            const end = endOfWeekISO(start);
+            const arr = await fetchWaterDaily(waterDeviceId.value, start, end);
+
+            const dayToUsage = new Map();
+            for (const item of arr || []) {
+                const day = item?.day;
+                if (!day) continue;
+                dayToUsage.set(day, dailyUsageFromReadings(item?.readings || []));
+            }
+
+            const days = dateRangeISO(start, end);
+            let total = 0;
+            for (const d of days) total += Number(dayToUsage.get(d) || 0);
+
+            waterKpiWeekly.value = r1(total);
+        }
+    } catch (e) {
+        console.error("refreshWaterKpis failed:", e);
+        waterKpiDaily.value = 0;
+        waterKpiWeekly.value = 0;
+        waterKpiHourly.value = 0;
+    }
+}
+
+/** ---- GAS KPIs (existing) ---- **/
+const gasKpiDaily = computed(() => {
+    const dates = new Set([gasDate.value]);
+    return sumConsumption(filterRowsGas({ utility: "gas", tenant: gasTenant.value, gateway: gasGateway.value, dates }));
+});
+const gasKpiWeekly = computed(() => {
+    const start = isoWeekToMonday(gasWeek.value);
+    const end = endOfWeekISO(start);
+    const days = dateRangeISO(start, end);
+    return sumConsumption(
+        filterRowsGas({ utility: "gas", tenant: gasTenant.value, gateway: gasGateway.value, dates: new Set(days) })
+    );
+});
+const gasKpiMonthly = computed(() => {
+    const refD = monthStartISO(gasMonth.value);
+    // keep your existing monthly gas logic (weekly buckets over month)
+    const weeks = (() => {
+        const d = new Date(refD);
+        const y = d.getFullYear();
+        const m = d.getMonth();
+        const first = new Date(y, m, 1);
+        const last = new Date(y, m + 1, 0);
+
+        const out = [];
+        let cur = startOfWeekISO(first.toISOString().slice(0, 10));
+        while (new Date(cur) <= last) {
+            out.push({ start: cur, end: endOfWeekISO(cur) });
+            const next = new Date(cur);
+            next.setDate(next.getDate() + 7);
+            cur = next.toISOString().slice(0, 10);
+        }
+        return out;
+    })();
+
+    const days = weeks.flatMap((w) => dateRangeISO(w.start, w.end));
+    return sumConsumption(
+        filterRowsGas({ utility: "gas", tenant: gasTenant.value, gateway: gasGateway.value, dates: new Set(days) })
+    );
+});
 
 /** ---- chart refs ---- **/
 const waterCanvas = ref(null);
@@ -368,107 +547,127 @@ onBeforeUnmount(() => {
     gasChart?.destroy();
 });
 
-/** ---- filtering + aggregation ---- **/
-function filterRows({ utility, tenant, gateway, dates }) {
-    return meterDaily.value.filter(r => {
-        if (!r) return false;
-        if (utility && r.meter_type !== utility) return false;
+/** ---- WATER chart data (API) ---- **/
+async function buildWaterBarData() {
+    const deviceId = waterDeviceId.value;
+    const mode = waterMode.value;
 
-        // ✅ role enforcement (hard filter)
-        const enforcedTenant = isNormalUser.value ? lockedTenant.value : "";
-        const effectiveTenant = enforcedTenant || tenant;
+    if (!deviceId) return { labels: [], values: [] };
 
-        if (effectiveTenant && r.tenant !== effectiveTenant) return false;
-        if (gateway && r.gateway_id !== gateway) return false;
-        if (dates && !dates.has(r.date)) return false;
+    if (mode === "hourly") {
+        const arr = await fetchWaterDaily(deviceId, waterDate.value, waterDate.value);
+        const row = arr?.find((x) => x?.day === waterDate.value) || arr?.[0];
+        const readings = row?.readings || [];
+        const values = hourlyUsageBuckets(readings);
+        const labels = Array.from({ length: 24 }, (_, i) => `${pad2(i)}:00`);
+        if (!values.some((x) => Number(x) !== 0)) return { labels: [], values: [] };
+        return { labels, values };
+    }
 
-        // site admin restriction can go here later when your dataset has site_id:
-        // if (isSiteAdmin.value && siteId?.value && r.site_id !== siteId.value) return false;
+    if (mode === "daily") {
+        const v = await getWaterDailyUsage(deviceId, waterDate.value);
+        if (!v) return { labels: [], values: [] };
+        return { labels: [waterDate.value], values: [v] };
+    }
 
-        return true;
-    });
+    if (mode === "weekly") {
+        const start = isoWeekToMonday(waterWeek.value);
+        const end = endOfWeekISO(start);
+
+        const arr = await fetchWaterDaily(deviceId, start, end);
+        const dayToUsage = new Map();
+        for (const item of arr || []) {
+            const day = item?.day;
+            if (!day) continue;
+            dayToUsage.set(day, dailyUsageFromReadings(item?.readings || []));
+        }
+
+        const days = dateRangeISO(start, end);
+        const labels = [];
+        const values = [];
+        for (const d of days) {
+            labels.push(d);
+            values.push(r1(dayToUsage.get(d) || 0));
+        }
+
+        if (!values.some((x) => Number(x) !== 0)) return { labels: [], values: [] };
+        return { labels, values };
+    }
+
+    if (mode === "monthly") {
+        // full month: daily bars
+        const start = monthStartISO(waterMonth.value);
+        const end = monthEndISO(waterMonth.value);
+
+        const arr = await fetchWaterDaily(deviceId, start, end);
+        const dayToUsage = new Map();
+        for (const item of arr || []) {
+            const day = item?.day;
+            if (!day) continue;
+            dayToUsage.set(day, dailyUsageFromReadings(item?.readings || []));
+        }
+
+        const days = dateRangeISO(start, end);
+        const labels = [];
+        const values = [];
+        for (const d of days) {
+            labels.push(d);
+            values.push(r1(dayToUsage.get(d) || 0));
+        }
+
+        if (!values.some((x) => Number(x) !== 0)) return { labels: [], values: [] };
+        return { labels, values };
+    }
+
+    return { labels: [], values: [] };
 }
 
-function sumConsumption(rows) {
-    let t = 0;
-    for (const r of rows) t += Number(r.consumption || 0);
-    return r1(t);
-}
-
-/** ---- KPIs ---- **/
-const waterWeekRangeLabel = computed(() => {
-    const refD = weekValueToRefDate(waterWeek.value);
-    return `${startOfWeekISO(refD)} → ${endOfWeekISO(refD)}`;
-});
-const gasWeekRangeLabel = computed(() => {
-    const refD = weekValueToRefDate(gasWeek.value);
-    return `${startOfWeekISO(refD)} → ${endOfWeekISO(refD)}`;
-});
-
-const waterKpiDaily = computed(() => {
-    const dates = new Set([waterDate.value]);
-    return sumConsumption(filterRows({ utility: "water", tenant: waterTenant.value, gateway: waterGateway.value, dates }));
-});
-const gasKpiDaily = computed(() => {
-    const dates = new Set([gasDate.value]);
-    return sumConsumption(filterRows({ utility: "gas", tenant: gasTenant.value, gateway: gasGateway.value, dates }));
-});
-
-const waterKpiWeekly = computed(() => {
-    const refD = weekValueToRefDate(waterWeek.value);
-    const days = dateRangeISO(startOfWeekISO(refD), endOfWeekISO(refD));
-    return sumConsumption(filterRows({ utility: "water", tenant: waterTenant.value, gateway: waterGateway.value, dates: new Set(days) }));
-});
-const gasKpiWeekly = computed(() => {
-    const refD = weekValueToRefDate(gasWeek.value);
-    const days = dateRangeISO(startOfWeekISO(refD), endOfWeekISO(refD));
-    return sumConsumption(filterRows({ utility: "gas", tenant: gasTenant.value, gateway: gasGateway.value, dates: new Set(days) }));
-});
-
-const waterKpiMonthly = computed(() => {
-    const refD = monthValueToRefDate(waterMonth.value);
-    const weeks = weeksOfMonthISO(refD);
-    const days = weeks.flatMap(w => dateRangeISO(w.start, w.end));
-    return sumConsumption(filterRows({ utility: "water", tenant: waterTenant.value, gateway: waterGateway.value, dates: new Set(days) }));
-});
-const gasKpiMonthly = computed(() => {
-    const refD = monthValueToRefDate(gasMonth.value);
-    const weeks = weeksOfMonthISO(refD);
-    const days = weeks.flatMap(w => dateRangeISO(w.start, w.end));
-    return sumConsumption(filterRows({ utility: "gas", tenant: gasTenant.value, gateway: gasGateway.value, dates: new Set(days) }));
-});
-
-/** ---- chart data ---- **/
-function buildBarData({ utility, mode, tenant, gateway, date, week, month }) {
+/** ---- GAS chart data (existing) ---- **/
+function buildGasBarData({ utility, mode, tenant, gateway, date, week, month }) {
     const labels = [];
     const values = [];
 
     if (mode === "daily") {
-        const rows = filterRows({ utility, tenant, gateway, dates: new Set([date]) });
+        const rows = filterRowsGas({ utility, tenant, gateway, dates: new Set([date]) });
         labels.push(date);
         values.push(sumConsumption(rows));
     }
 
     if (mode === "weekly") {
-        const refD = weekValueToRefDate(week);
-        const start = startOfWeekISO(refD);
-        const end = endOfWeekISO(refD);
+        const start = isoWeekToMonday(week);
+        const end = endOfWeekISO(start);
         const days = dateRangeISO(start, end);
 
         for (const d of days) {
-            const rows = filterRows({ utility, tenant, gateway, dates: new Set([d]) });
+            const rows = filterRowsGas({ utility, tenant, gateway, dates: new Set([d]) });
             labels.push(d);
             values.push(sumConsumption(rows));
         }
     }
 
     if (mode === "monthly") {
-        const refD = monthValueToRefDate(month);
-        const weeks = weeksOfMonthISO(refD);
+        const refD = monthStartISO(month);
+        const weeks = (() => {
+            const d = new Date(refD);
+            const y = d.getFullYear();
+            const m = d.getMonth();
+            const first = new Date(y, m, 1);
+            const last = new Date(y, m + 1, 0);
+
+            const out = [];
+            let cur = startOfWeekISO(first.toISOString().slice(0, 10));
+            while (new Date(cur) <= last) {
+                out.push({ start: cur, end: endOfWeekISO(cur) });
+                const next = new Date(cur);
+                next.setDate(next.getDate() + 7);
+                cur = next.toISOString().slice(0, 10);
+            }
+            return out;
+        })();
 
         weeks.forEach((w, i) => {
             const days = dateRangeISO(w.start, w.end);
-            const rows = filterRows({ utility, tenant, gateway, dates: new Set(days) });
+            const rows = filterRowsGas({ utility, tenant, gateway, dates: new Set(days) });
             labels.push(`Week ${i + 1}`);
             values.push(sumConsumption(rows));
         });
@@ -478,31 +677,36 @@ function buildBarData({ utility, mode, tenant, gateway, date, week, month }) {
 }
 
 /** ---- chart builders ---- **/
-function buildWaterChart() {
+async function buildWaterChart() {
     if (!waterCanvas.value) return;
 
-    const { labels, values } = buildBarData({
-        utility: "water",
-        mode: waterMode.value,
-        tenant: waterTenant.value,
-        gateway: waterGateway.value,
-        date: waterDate.value,
-        week: waterWeek.value,
-        month: waterMonth.value
-    });
+    waterApiLoading.value = true;
+    try {
+        const { labels, values } = await buildWaterBarData();
 
-    waterChart?.destroy();
-    waterChart = new Chart(waterCanvas.value, {
-        type: "bar",
-        data: { labels, datasets: [{ label: "Water (m³)", data: values }] },
-        options: { responsive: true, maintainAspectRatio: false }
-    });
+        waterChart?.destroy();
+        waterChart = new Chart(waterCanvas.value, {
+            type: "bar",
+            data: { labels, datasets: [{ label: "Water (m³)", data: values }] },
+            options: { responsive: true, maintainAspectRatio: false }
+        });
+    } catch (e) {
+        console.error("buildWaterChart failed:", e);
+        waterChart?.destroy();
+        waterChart = new Chart(waterCanvas.value, {
+            type: "bar",
+            data: { labels: [], datasets: [{ label: "Water (m³)", data: [] }] },
+            options: { responsive: true, maintainAspectRatio: false }
+        });
+    } finally {
+        waterApiLoading.value = false;
+    }
 }
 
 function buildGasChart() {
     if (!gasCanvas.value) return;
 
-    const { labels, values } = buildBarData({
+    const { labels, values } = buildGasBarData({
         utility: "gas",
         mode: gasMode.value,
         tenant: gasTenant.value,
@@ -521,41 +725,59 @@ function buildGasChart() {
 }
 
 /** ---- watchers ---- **/
-watch([waterMode, waterTenant, waterGateway, waterDate, waterWeek, waterMonth], buildWaterChart);
+watch([waterMode, waterTenant, waterDeviceId, waterDate, waterWeek, waterMonth], async () => {
+    // waterTenant is placeholder; still triggers refresh so UI feels consistent
+    await refreshWaterKpis();
+    await buildWaterChart();
+});
+
 watch([gasMode, gasTenant, gasGateway, gasDate, gasWeek, gasMonth], buildGasChart);
 
-// If role/tenant changes at runtime, re-apply lock
+// role lock (gas + placeholder water)
 watch([role, lockedTenant], () => {
     if (isNormalUser.value) {
-        waterTenant.value = lockedTenant.value;
         gasTenant.value = lockedTenant.value;
+        waterTenant.value = lockedTenant.value;
     }
-    buildWaterChart();
     buildGasChart();
 });
 
 /** ---- export ---- **/
-function exportSectionCsv(utility) {
-    const isWater = utility === "water";
-    const mode = isWater ? waterMode.value : gasMode.value;
-    const tenant = isWater ? waterTenant.value : gasTenant.value;
-    const gateway = isWater ? waterGateway.value : gasGateway.value;
-    const date = isWater ? waterDate.value : gasDate.value;
-    const week = isWater ? waterWeek.value : gasWeek.value;
-    const month = isWater ? waterMonth.value : gasMonth.value;
+async function exportSectionCsv(utility) {
+    if (utility === "water") {
+        const { labels, values } = await buildWaterBarData();
+        const out = labels.map((p, i) => ({
+            utility: "water",
+            mode: waterMode.value,
+            tenant: isNormalUser.value ? lockedTenant.value : waterTenant.value || "ALL", // placeholder exported
+            gateway: waterDeviceId.value || "ALL",
+            period: p,
+            m3: values[i]
+        }));
+        exportToCsv(`water_${waterMode.value}_${waterDeviceId.value || "ALL"}.csv`, out);
+        return;
+    }
 
-    const { labels, values } = buildBarData({ utility, mode, tenant, gateway, date, week, month });
+    const { labels, values } = buildGasBarData({
+        utility,
+        mode: gasMode.value,
+        tenant: gasTenant.value,
+        gateway: gasGateway.value,
+        date: gasDate.value,
+        week: gasWeek.value,
+        month: gasMonth.value
+    });
 
     const out = labels.map((p, i) => ({
         utility,
-        mode,
-        tenant: (isNormalUser.value ? lockedTenant.value : (tenant || "ALL")),
-        gateway: gateway || "ALL",
+        mode: gasMode.value,
+        tenant: isNormalUser.value ? lockedTenant.value : gasTenant.value || "ALL",
+        gateway: gasGateway.value || "ALL",
         period: p,
         m3: values[i]
     }));
 
-    exportToCsv(`${utility}_${mode}_${(tenant || "ALL")}_${(gateway || "ALL")}.csv`, out);
+    exportToCsv(`${utility}_${gasMode.value}_${gasTenant.value || "ALL"}_${gasGateway.value || "ALL"}.csv`, out);
 }
 
 function exportSectionPng(utility) {
@@ -571,14 +793,17 @@ function printPage() {
     window.print();
 }
 
-watch([gatewayOptionsWater, gatewayOptionsGas], () => {
-    if (!isNormalUser.value) return;
+/** ---- mount ---- **/
+onMounted(async () => {
+    await store.load();
+    applyRoleDefaults();
 
-    // if currently "All", snap to first available
-    if (!waterGateway.value) waterGateway.value = gatewayOptionsWater.value[0]?.gateway_id ?? "";
-    if (!gasGateway.value) gasGateway.value = gatewayOptionsGas.value[0]?.gateway_id ?? "";
+    await loadWaterDevices();
+
+    await refreshWaterKpis();
+    await buildWaterChart();
+    buildGasChart();
 });
-
 </script>
 
 <style scoped>
