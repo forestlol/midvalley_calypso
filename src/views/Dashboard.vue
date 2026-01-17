@@ -320,7 +320,7 @@ const tenantOptions = computed(() => {
  * WATER: devices + daily API
  * --------------------------**/
 const DEVICES_URL = "https://midvalley-devices.rshare.io/devices?limit=1000&skip=0";
-const WATER_DAILY_BASE = "http://localhost:8003/daily";
+const WATER_DAILY_BASE = "https://midvalley-devices.rshare.io/daily";
 
 // user can pick "All" or this gateway id (UI placeholder; API doesn't use it)
 const WATER_DEFAULT_GATEWAY_ID = "647fdafffe01f876";
