@@ -270,7 +270,7 @@ const tenantOptions = computed(() => {
  * WATER: devices + daily API
  * --------------------------**/
 const DEVICES_URL = "https://midvalley-devices.rshare.io/devices?limit=1000&skip=0";
-const WATER_DAILY_BASE = "http://localhost:8003/daily";
+const WATER_DAILY_BASE = "https://midvalley-devices.rshare.io/daily";
 
 const waterApiLoading = ref(false);
 const waterDevices = ref([]);
