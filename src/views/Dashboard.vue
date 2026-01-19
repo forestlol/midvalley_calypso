@@ -162,23 +162,32 @@
                 </div>
 
                 <!-- SECTION KPIs -->
-                <div class="sectionKpis">
+                <div class="sectionKpis waterKpis4">
                     <div class="skpi">
                         <div class="label">Hourly</div>
                         <div class="value">{{ waterKpiHourly }} <span class="unit">m³</span></div>
                         <div class="sub">{{ waterDate }}</div>
                     </div>
+
                     <div class="skpi">
                         <div class="label">Daily</div>
                         <div class="value">{{ waterKpiDaily }} <span class="unit">m³</span></div>
                         <div class="sub">{{ waterDate }}</div>
                     </div>
+
                     <div class="skpi">
                         <div class="label">Weekly</div>
                         <div class="value">{{ waterKpiWeekly }} <span class="unit">m³</span></div>
                         <div class="sub">{{ waterWeekRangeLabel }}</div>
                     </div>
+
+                    <div class="skpi">
+                        <div class="label">Cumulative (Latest)</div>
+                        <div class="value">{{ waterKpiCumulative }} <span class="unit">m³</span></div>
+                        <div class="sub">{{ waterKpiCumulativeTs || "—" }}</div>
+                    </div>
                 </div>
+
 
                 <!-- CHART -->
                 <div class="chartWrap">
@@ -1093,15 +1102,24 @@ const waterKpiDaily = ref(0);
 const waterKpiWeekly = ref(0);
 const waterKpiHourly = ref(0);
 
+const waterKpiCumulative = ref(0);      // latest dispNum
+const waterKpiCumulativeTs = ref("");   // latest timestamp label
+
 async function refreshWaterKpis() {
     try {
         const isAll = !waterDeviceId.value;
 
-        // Daily + Hourly
+        // reset cumulative
+        waterKpiCumulative.value = 0;
+        waterKpiCumulativeTs.value = "";
+
+        // Daily + Hourly + CUMULATIVE
         if (isAll) {
+            // Daily usage (sum across tenants)
             const map = await getUsageMapAllTenants(waterDate.value, waterDate.value);
             waterKpiDaily.value = r1(map.get(waterDate.value) || 0);
 
+            // Hourly usage (sum across tenants)
             const ids = (waterDevices.value || []).map((d) => d.device_id).filter(Boolean);
             const perDeviceBuckets = await Promise.all(
                 ids.map(async (id) => {
@@ -1120,13 +1138,56 @@ async function refreshWaterKpis() {
                 for (let i = 0; i < 24; i++) summed[i] += Number(buckets?.[i] || 0);
             }
             waterKpiHourly.value = r1(summed.reduce((a, b) => a + b, 0));
+
+            // Cumulative (Latest): sum of each device's latest dispNum (using a 7-day window)
+            // (We use a small window because “latest” might be not today.)
+            const end = todaySgtISO();
+            const start = (() => {
+                const d = new Date(end);
+                d.setDate(d.getDate() - 7);
+                return d.toISOString().slice(0, 10);
+            })();
+
+            const latestPerDevice = await Promise.all(
+                ids.map(async (id) => {
+                    try {
+                        const arr = await fetchWaterDaily(id, start, end, WATER_FETCH_LIMIT, "desc");
+                        const latest = latestCumulativeFromDailyRows(arr);
+                        return latest.value;
+                    } catch {
+                        return 0;
+                    }
+                })
+            );
+
+            waterKpiCumulative.value = r1(latestPerDevice.reduce((a, b) => a + Number(b || 0), 0));
+            waterKpiCumulativeTs.value = "Latest";
+
         } else {
+            // Selected device only
+
+            // Daily usage
             waterKpiDaily.value = await getWaterDailyUsage(waterDeviceId.value, waterDate.value);
 
+            // Hourly usage (sum of hour buckets)
             const arr = await fetchWaterDaily(waterDeviceId.value, waterDate.value, waterDate.value);
             const row = arr?.find((x) => x?.day === waterDate.value) || arr?.[0];
             const buckets = hourlyUsageBuckets(row?.readings || []);
             waterKpiHourly.value = r1(buckets.reduce((a, b) => a + Number(b || 0), 0));
+
+            // Cumulative (Latest) for this device (use last 7 days window)
+            const end = todaySgtISO();
+            const start = (() => {
+                const d = new Date(end);
+                d.setDate(d.getDate() - 7);
+                return d.toISOString().slice(0, 10);
+            })();
+
+            const rows = await fetchWaterDaily(waterDeviceId.value, start, end, WATER_FETCH_LIMIT, "desc");
+            const latest = latestCumulativeFromDailyRows(rows);
+
+            waterKpiCumulative.value = latest.value;
+            waterKpiCumulativeTs.value = latest.label || "—";
         }
 
         // Weekly KPI
@@ -1148,8 +1209,11 @@ async function refreshWaterKpis() {
         waterKpiDaily.value = 0;
         waterKpiWeekly.value = 0;
         waterKpiHourly.value = 0;
+        waterKpiCumulative.value = 0;
+        waterKpiCumulativeTs.value = "";
     }
 }
+
 
 /** ---- GAS KPIs ---- **/
 const gasKpiDaily = computed(() => {
@@ -1187,6 +1251,56 @@ onBeforeUnmount(() => {
     waterChart?.destroy();
     gasChart?.destroy();
 });
+
+function parseReadingTsToMs(tStr, dayStr) {
+    // readings.t is typically "HH:mm:ss" (sometimes with ms). Build a sortable timestamp.
+    // We treat it as SGT-ish display time (same as your other logic).
+    if (!tStr || !dayStr) return -Infinity;
+
+    const t = String(tStr);
+    const hh = Number(t.slice(0, 2));
+    const mm = Number(t.slice(3, 5));
+    const ss = Number(t.slice(6, 8));
+
+    if (!Number.isFinite(hh) || !Number.isFinite(mm) || !Number.isFinite(ss)) return -Infinity;
+
+    // Use Date.UTC to avoid local timezone messing with ordering
+    const [y, m, d] = dayStr.split("-").map(Number);
+    if (!Number.isFinite(y) || !Number.isFinite(m) || !Number.isFinite(d)) return -Infinity;
+
+    return Date.UTC(y, m - 1, d, hh, mm, ss);
+}
+
+function formatDayTime(dayStr, tStr) {
+    if (!dayStr || !tStr) return "";
+    return `${dayStr} ${String(tStr).slice(0, 5)}`; // "YYYY-MM-DD HH:mm"
+}
+
+function latestCumulativeFromDailyRows(dailyRows) {
+    // dailyRows: array returned by /daily/{device}?start_day=...&end_day=...
+    // Each row has { day, readings: [{t, dispNum}, ...] }
+    let bestMs = -Infinity;
+    let bestVal = 0;
+    let bestLabel = "";
+
+    for (const row of dailyRows || []) {
+        const day = row?.day;
+        const readings = Array.isArray(row?.readings) ? row.readings : [];
+        for (const r of readings) {
+            const v = Number(r?.dispNum);
+            if (!Number.isFinite(v)) continue;
+
+            const ms = parseReadingTsToMs(r?.t, day);
+            if (ms > bestMs) {
+                bestMs = ms;
+                bestVal = v;
+                bestLabel = formatDayTime(day, r?.t);
+            }
+        }
+    }
+
+    return { value: r1(bestVal), label: bestLabel };
+}
 
 /** ---- WATER chart data ---- **/
 async function buildWaterBarData() {
@@ -1657,6 +1771,16 @@ canvas {
 @media (max-width: 900px) {
     .fullWidth .filters {
         grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+}
+
+.sectionKpis.waterKpis4 {
+    grid-template-columns: repeat(4, 1fr);
+}
+
+@media (max-width: 1200px) {
+    .sectionKpis.waterKpis4 {
+        grid-template-columns: repeat(2, 1fr);
     }
 }
 </style>
