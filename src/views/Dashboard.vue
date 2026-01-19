@@ -337,6 +337,54 @@ function currentMonthValSgt() {
     return `${y}-${m}`;
 }
 
+function latestReadingInDay(readings, dayStr) {
+    // returns { value, label, ms } for latest reading in that day
+    let bestMs = -Infinity;
+    let bestVal = 0;
+    let bestLabel = "";
+
+    for (const r of readings || []) {
+        const v = Number(r?.dispNum);
+        if (!Number.isFinite(v)) continue;
+
+        const ms = parseReadingTsToMs(r?.t, dayStr);
+        if (ms > bestMs) {
+            bestMs = ms;
+            bestVal = v;
+            bestLabel = formatDayTime(dayStr, r?.t);
+        }
+    }
+
+    return { value: r1(bestVal), label: bestLabel, ms: bestMs };
+}
+
+function cumulativeHourlyFromReadings(readings, dayStr) {
+    // cumulative per hour: the latest dispNum seen up to that hour
+    const perHourLatestMs = Array(24).fill(-Infinity);
+    const perHourVal = Array(24).fill(0);
+
+    for (const r of readings || []) {
+        const t = String(r?.t || "");
+        const hour = Number(t.slice(0, 2));
+        const v = Number(r?.dispNum);
+        if (!Number.isFinite(hour) || hour < 0 || hour > 23) continue;
+        if (!Number.isFinite(v)) continue;
+
+        const ms = parseReadingTsToMs(r?.t, dayStr);
+        if (ms > perHourLatestMs[hour]) {
+            perHourLatestMs[hour] = ms;
+            perHourVal[hour] = v;
+        }
+    }
+
+    // forward-fill (if hour has no reading, use last known)
+    let last = 0;
+    return perHourVal.map((v, i) => {
+        if (perHourLatestMs[i] === -Infinity) return r1(last);
+        last = v;
+        return r1(v);
+    });
+}
 
 async function loadTHDevices() {
     thApiLoading.value = true;
@@ -1302,6 +1350,177 @@ function latestCumulativeFromDailyRows(dailyRows) {
     return { value: r1(bestVal), label: bestLabel };
 }
 
+async function buildWaterCumulativeSeries() {
+    const mode = waterMode.value;
+    const isAll = !waterDeviceId.value;
+
+    // Utility: get daily rows for a single device over a range
+    async function getRows(deviceId, startDay, endDay) {
+        return await fetchWaterDaily(deviceId, startDay, endDay, WATER_FETCH_LIMIT, "desc");
+    }
+
+    if (mode === "hourly") {
+        const labels = Array.from({ length: 24 }, (_, i) => `${pad2(i)}:00`);
+
+        if (isAll) {
+            const ids = (waterDevices.value || []).map((d) => d.device_id).filter(Boolean);
+            const perDevice = await Promise.all(
+                ids.map(async (id) => {
+                    try {
+                        const arr = await getRows(id, waterDate.value, waterDate.value);
+                        const row = arr?.find((x) => x?.day === waterDate.value) || arr?.[0];
+                        return cumulativeHourlyFromReadings(row?.readings || [], waterDate.value);
+                    } catch {
+                        return Array(24).fill(0);
+                    }
+                })
+            );
+
+            const summed = Array(24).fill(0);
+            for (const series of perDevice) {
+                for (let i = 0; i < 24; i++) summed[i] += Number(series?.[i] || 0);
+            }
+
+            return { labels, cumulative: summed.map(r1) };
+        }
+
+        const arr = await getRows(waterDeviceId.value, waterDate.value, waterDate.value);
+        const row = arr?.find((x) => x?.day === waterDate.value) || arr?.[0];
+        return { labels, cumulative: cumulativeHourlyFromReadings(row?.readings || [], waterDate.value) };
+    }
+
+    if (mode === "daily") {
+        if (isAll) {
+            const ids = (waterDevices.value || []).map((d) => d.device_id).filter(Boolean);
+            const latestVals = await Promise.all(
+                ids.map(async (id) => {
+                    try {
+                        const arr = await getRows(id, waterDate.value, waterDate.value);
+                        const row = arr?.find((x) => x?.day === waterDate.value) || arr?.[0];
+                        return latestReadingInDay(row?.readings || [], waterDate.value).value;
+                    } catch {
+                        return 0;
+                    }
+                })
+            );
+            return { labels: [waterDate.value], cumulative: [r1(latestVals.reduce((a, b) => a + Number(b || 0), 0))] };
+        }
+
+        const arr = await getRows(waterDeviceId.value, waterDate.value, waterDate.value);
+        const row = arr?.find((x) => x?.day === waterDate.value) || arr?.[0];
+        const latest = latestReadingInDay(row?.readings || [], waterDate.value).value;
+        return { labels: [waterDate.value], cumulative: [r1(latest)] };
+    }
+
+    if (mode === "weekly") {
+        const start = isoWeekToMonday(waterWeek.value);
+        const end = endOfWeekISO(start);
+        const days = dateRangeISO(start, end);
+
+        if (isAll) {
+            const ids = (waterDevices.value || []).map((d) => d.device_id).filter(Boolean);
+            const deviceMaps = await Promise.all(
+                ids.map(async (id) => {
+                    const m = new Map();
+                    try {
+                        const arr = await getRows(id, start, end);
+                        for (const day of days) {
+                            const row = arr?.find((x) => x?.day === day);
+                            const v = latestReadingInDay(row?.readings || [], day).value;
+                            m.set(day, v);
+                        }
+                    } catch {
+                        for (const day of days) m.set(day, 0);
+                    }
+                    return m;
+                })
+            );
+
+            const cumulative = days.map((day) => {
+                let sum = 0;
+                for (const m of deviceMaps) sum += Number(m.get(day) || 0);
+                return r1(sum);
+            });
+
+            return { labels: days, cumulative };
+        }
+
+        const arr = await getRows(waterDeviceId.value, start, end);
+        const cumulative = days.map((day) => {
+            const row = arr?.find((x) => x?.day === day);
+            return r1(latestReadingInDay(row?.readings || [], day).value);
+        });
+
+        return { labels: days, cumulative };
+    }
+
+    // monthly (same labels as your water monthly: Week 1..Week N)
+    const weeks = weeksToShowForMonth(waterMonth.value);
+    if (!weeks.length) return { labels: [], cumulative: [] };
+
+    const monthStart = monthStartISO(waterMonth.value);
+    const monthEnd = monthEndISO(waterMonth.value);
+
+    const selected = ymKey(waterMonth.value);
+    const current = ymKey(currentMonthValSgt());
+    const t = todaySgtISO();
+    const isCurrentMonth = selected === current;
+
+    if (isAll) {
+        const ids = (waterDevices.value || []).map((d) => d.device_id).filter(Boolean);
+
+        const latestPerDevicePerWeek = await Promise.all(
+            ids.map(async (id) => {
+                const out = [];
+                try {
+                    const arr = await getRows(id, monthStart, monthEnd);
+                    for (const w of weeks) {
+                        const effectiveEnd = isCurrentMonth && w.start <= t && t <= w.end ? t : w.end;
+
+                        // pick latest reading within that week range (across days)
+                        let best = { value: 0, ms: -Infinity };
+                        const days = dateRangeISO(w.start, effectiveEnd);
+                        for (const day of days) {
+                            const row = arr?.find((x) => x?.day === day);
+                            const latest = latestReadingInDay(row?.readings || [], day);
+                            if (latest.ms > best.ms) best = { value: latest.value, ms: latest.ms };
+                        }
+                        out.push(best.value);
+                    }
+                } catch {
+                    for (let i = 0; i < weeks.length; i++) out.push(0);
+                }
+                return out;
+            })
+        );
+
+        const cumulative = weeks.map((_, i) => {
+            let sum = 0;
+            for (const arr of latestPerDevicePerWeek) sum += Number(arr?.[i] || 0);
+            return r1(sum);
+        });
+
+        return { labels: weeks.map((w) => w.label), cumulative };
+    }
+
+    const arr = await getRows(waterDeviceId.value, monthStart, monthEnd);
+    const cumulative = weeks.map((w) => {
+        const effectiveEnd = isCurrentMonth && w.start <= t && t <= w.end ? t : w.end;
+
+        let best = { value: 0, ms: -Infinity };
+        const days = dateRangeISO(w.start, effectiveEnd);
+        for (const day of days) {
+            const row = arr?.find((x) => x?.day === day);
+            const latest = latestReadingInDay(row?.readings || [], day);
+            if (latest.ms > best.ms) best = { value: latest.value, ms: latest.ms };
+        }
+
+        return r1(best.value);
+    });
+
+    return { labels: weeks.map((w) => w.label), cumulative };
+}
+
 /** ---- WATER chart data ---- **/
 async function buildWaterBarData() {
     const mode = waterMode.value;
@@ -1519,17 +1738,22 @@ async function exportSectionCsv(utility) {
 
     if (utility === "water") {
         const { labels, values } = await buildWaterBarData();
+        const { cumulative } = await buildWaterCumulativeSeries();
+
         const out = labels.map((p, i) => ({
             utility: "water",
             mode: waterMode.value,
             tenant: waterDeviceId.value || "ALL",
             gateway: waterGateway.value || "ALL",
             period: p,
-            m3: values[i]
+            m3: values[i],
+            cumulative_m3: cumulative?.[i] ?? 0
         }));
+
         exportToCsv(`water_${waterMode.value}_${waterDeviceId.value || "ALL"}.csv`, out);
         return;
     }
+
 
     const { labels, values } = buildGasBarData({
         utility,
