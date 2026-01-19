@@ -84,7 +84,7 @@
                 </div>
 
                 <div class="filter">
-                    <div class="filterLabel">Summary</div>
+                    <div class="filterLabel">Average</div>
                     <div class="input" style="background:#fafbfe; display:flex; align-items:center; gap:10px;">
                         <template v-if="thMetric === 'temp'">
                             <span><b>{{ thKpiTemp }}</b> °C</span>
