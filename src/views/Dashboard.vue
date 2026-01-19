@@ -22,6 +22,85 @@
                 <div class="value">{{ gasMeterCount }}</div>
             </div>
         </div>
+        <!-- TEMP + HUM (FULL WIDTH, ABOVE BOTH) -->
+        <section class="card fullWidth">
+            <div class="header">
+                <div class="title">
+                    Temperature & Humidity
+                    <span v-if="thApiLoading"
+                        style="font-size: 12px; color: #8a94a6; margin-left: 8px">(syncing…)</span>
+                </div>
+
+                <div class="actions">
+                    <button class="btn" @click="printPage">Print</button>
+                    <button class="btn" @click="exportSectionCsv('th')">Export CSV</button>
+                    <button class="btn" @click="exportSectionPng('th')">Export PNG</button>
+                </div>
+            </div>
+
+            <div class="filters">
+                <div class="filter">
+                    <div class="filterLabel">Device</div>
+                    <select v-model="thDeviceId" class="input" :disabled="thDevices.length === 0">
+                        <option value="">All Devices</option>
+                        <option v-for="id in thDevices" :key="id" :value="id">{{ id }}</option>
+                    </select>
+                </div>
+
+                <!-- Gateway: same pattern as Water (UI placeholder only) -->
+                <div class="filter">
+                    <div class="filterLabel">Gateway</div>
+                    <select v-model="thGateway" class="input">
+                        <option value="">All Gateways</option>
+                        <option :value="TH_DEFAULT_GATEWAY_ID">{{ TH_DEFAULT_GATEWAY_ID }}</option>
+                    </select>
+                </div>
+
+                <div class="filter">
+                    <div class="filterLabel">Mode</div>
+                    <select v-model="thMode" class="input">
+                        <option value="hourly">Hourly</option>
+                        <option value="daily">Daily</option>
+                        <option value="weekly">Weekly</option>
+                        <option value="monthly">Monthly</option>
+                    </select>
+                </div>
+
+                <div class="filter">
+                    <div class="filterLabel">Period</div>
+                    <input v-if="thMode === 'hourly' || thMode === 'daily'" v-model="thDate" type="date"
+                        class="input" />
+                    <input v-else-if="thMode === 'weekly'" v-model="thWeek" type="week" class="input" />
+                    <input v-else v-model="thMonth" type="month" class="input" />
+                </div>
+
+                <!-- NEW: Metric selector (Temperature OR Humidity) -->
+                <div class="filter">
+                    <div class="filterLabel">Metric</div>
+                    <select v-model="thMetric" class="input">
+                        <option value="temp">Temperature (°C)</option>
+                        <option value="hum">Humidity (%RH)</option>
+                    </select>
+                </div>
+
+                <div class="filter">
+                    <div class="filterLabel">Summary</div>
+                    <div class="input" style="background:#fafbfe; display:flex; align-items:center; gap:10px;">
+                        <template v-if="thMetric === 'temp'">
+                            <span><b>{{ thKpiTemp }}</b> °C</span>
+                        </template>
+                        <template v-else>
+                            <span><b>{{ thKpiHum }}</b> %RH</span>
+                        </template>
+                    </div>
+                </div>
+            </div>
+
+            <!-- CHART -->
+            <div class="chartWrap thChartWrap">
+                <canvas ref="thCanvas"></canvas>
+            </div>
+        </section>
 
         <!-- TWO-COLUMN CHARTS -->
         <div class="charts">
@@ -198,6 +277,483 @@ const role = computed(() => userRole?.value || "normal_user");
 const isNormalUser = computed(() => role.value === "normal_user");
 const lockedTenant = computed(() => (isNormalUser.value ? tenantName?.value || "BOOKSTORE" : ""));
 
+/** ---------------------------
+ * TEMP + HUM: devices + timeseries API
+ * --------------------------**/
+const TH_DEVICES_URL = "https://midvalley-temperature.rshare.io/api/konamicro/devices?limit=200";
+const TH_TS_URL = "https://midvalley-temperature.rshare.io/api/konamicro/timeseries";
+
+const thApiLoading = ref(false);
+const thDevices = ref([]);         // array of device ids (strings)
+const thDeviceId = ref("");        // "" = All Devices
+
+const thMode = ref("hourly");
+const thDate = ref(todayISO());    // default today
+const thWeek = ref("2026-W03");    // you can overwrite after store.load if you want
+const thMonth = ref(currentMonthVal());
+
+const thKpiTemp = ref(0);
+const thKpiHum = ref(0);
+
+const thCanvas = ref(null);
+let thChart = null;
+
+const thCache = new Map(); // key: device|start|end|limit
+
+// ---- SGT "now" helpers (works even if your browser is not in +8) ----
+const SGT_OFFSET_MS = 8 * 60 * 60 * 1000;
+
+function nowSgtDateObj() {
+    // take current UTC time, then shift to SGT
+    return new Date(Date.now() + SGT_OFFSET_MS);
+}
+
+function todaySgtISO() {
+    const d = nowSgtDateObj();
+    const y = d.getUTCFullYear();
+    const m = String(d.getUTCMonth() + 1).padStart(2, "0");
+    const dd = String(d.getUTCDate()).padStart(2, "0");
+    return `${y}-${m}-${dd}`;
+}
+
+function currentHourSgt() {
+    const d = nowSgtDateObj();
+    return d.getUTCHours(); // 0..23
+}
+
+function currentMonthValSgt() {
+    const d = nowSgtDateObj();
+    const y = d.getUTCFullYear();
+    const m = String(d.getUTCMonth() + 1).padStart(2, "0");
+    return `${y}-${m}`;
+}
+
+
+async function loadTHDevices() {
+    thApiLoading.value = true;
+    try {
+        const res = await fetch(TH_DEVICES_URL);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+
+        // data: { count, devices: [...] }
+        thDevices.value = Array.isArray(data?.devices) ? data.devices : [];
+    } catch (e) {
+        console.error("loadTHDevices failed:", e);
+        thDevices.value = [];
+    } finally {
+        thApiLoading.value = false;
+    }
+}
+
+async function fetchTHTimeseries(deviceId, startDay, endDay, limit = 5000) {
+    const key = `${deviceId}|${startDay}|${endDay}|${limit}`;
+    if (thCache.has(key)) return thCache.get(key);
+
+    const url =
+        `${TH_TS_URL}?device_id=${encodeURIComponent(deviceId)}` +
+        `&start=${encodeURIComponent(startDay)}` +
+        `&end=${encodeURIComponent(endDay)}` +
+        `&limit=${encodeURIComponent(limit)}`;
+
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+
+    const series = data?.series || {};
+    const ts = Array.isArray(series.ts) ? series.ts : [];
+    const temperature = Array.isArray(series.temperature_c) ? series.temperature_c : [];
+    const humidity = Array.isArray(series.humidity_rh) ? series.humidity_rh : [];
+
+    const points = [];
+    const n = Math.min(ts.length, temperature.length, humidity.length);
+    for (let i = 0; i < n; i++) {
+        const t = ts[i];
+        const temp = Number(temperature[i]);
+        const hum = Number(humidity[i]);
+        if (!t) continue;
+        if (!Number.isFinite(temp) || !Number.isFinite(hum)) continue;
+
+        // NOTE: API ts has no timezone; browser treats it as local time, which is fine for SG usage.
+        // API ts is UTC without timezone → force UTC, then add +8 hours (SGT)
+        const dtUtc = new Date(`${t}Z`);
+        if (Number.isNaN(dtUtc.getTime())) continue;
+
+        const dt = new Date(dtUtc.getTime() + 8 * 60 * 60 * 1000);
+
+        points.push({ dt, temp, hum });
+
+    }
+
+    thCache.set(key, points);
+    return points;
+}
+
+function avg(nums) {
+    let s = 0;
+    let c = 0;
+    for (const x of nums) {
+        const v = Number(x);
+        if (!Number.isFinite(v)) continue;
+        s += v;
+        c++;
+    }
+    return c ? s / c : 0;
+}
+
+/** ----- aggregation helpers ----- **/
+function groupByKey(points, keyFn) {
+    const map = new Map();
+    for (const p of points) {
+        const k = keyFn(p);
+        if (!map.has(k)) map.set(k, []);
+        map.get(k).push(p);
+    }
+    return map;
+}
+
+function isoDateSgt(dt) {
+    // dt was already shifted to SGT, so use UTC getters to avoid browser timezone interference
+    const y = dt.getUTCFullYear();
+    const m = String(dt.getUTCMonth() + 1).padStart(2, "0");
+    const d = String(dt.getUTCDate()).padStart(2, "0");
+    return `${y}-${m}-${d}`;
+}
+
+async function getTHPointsForSelection(startDay, endDay) {
+    const isAll = !thDeviceId.value;
+    const ids = isAll ? (thDevices.value || []) : [thDeviceId.value];
+    if (!ids.length) return [];
+
+    const results = await Promise.all(
+        ids.map(async (id) => {
+            try {
+                return await fetchTHTimeseries(id, startDay, endDay, 5000);
+            } catch (e) {
+                console.warn("TH device fetch failed:", id, e);
+                return [];
+            }
+        })
+    );
+
+    // merge all devices’ points
+    return results.flat();
+}
+
+async function buildTHLineData() {
+    const mode = thMode.value;
+
+    // decide start/end
+    let startDay = thDate.value;
+    let endDay = thDate.value;
+
+    if (mode === "weekly") {
+        const startDay = isoWeekToMonday(thWeek.value);   // Monday
+        const endDay = endOfWeekISO(startDay);           // Sunday
+
+        // Fetch points across the whole week (still timeseries, but we aggregate by DAY)
+        const points = await getTHPointsForSelection(startDay, endDay);
+
+        // Group points by date (SGT)
+        const byDay = groupByKey(points, (p) => isoDateSgt(p.dt));
+
+        const t = todaySgtISO();
+        let days = dateRangeISO(startDay, endDay);
+
+        // If this week includes today, do not show days after today
+        if (startDay <= t && t <= endDay) {
+            days = days.filter((d) => d <= t);
+        }
+
+        // If the whole week is in the future, show nothing
+        if (startDay > t) {
+            return { labels: [], temp: [], hum: [], kpiTemp: 0, kpiHum: 0 };
+        }
+
+
+        const labels = [];
+        const temp = [];
+        const hum = [];
+
+        for (const d of days) {
+            const arr = byDay.get(d) || [];
+            labels.push(d);
+            temp.push(r1(avg(arr.map((x) => x.temp)))); // avg([]) -> 0
+            hum.push(r1(avg(arr.map((x) => x.hum))));
+        }
+
+        // KPI = average across ALL points in the selected week (or 0 if none)
+        const kpiTemp = points.length ? r1(avg(points.map((p) => p.temp))) : 0;
+        const kpiHum = points.length ? r1(avg(points.map((p) => p.hum))) : 0;
+
+        return { labels, temp, hum, kpiTemp, kpiHum };
+    }
+    else if (mode === "monthly") {
+        startDay = monthStartISO(thMonth.value);
+        endDay = monthEndISO(thMonth.value);
+    }
+
+    const points = await getTHPointsForSelection(startDay, endDay);
+    if (!points.length) {
+        const labels = Array.from({ length: 24 }, (_, i) => `${pad2(i)}:00`);
+        const zeros = Array(24).fill(0);
+
+        return {
+            labels,
+            temp: zeros,
+            hum: zeros,
+            kpiTemp: 0,
+            kpiHum: 0
+        };
+    }
+
+    // KPI = average across all points in the selected range
+    const kpiTemp = r1(avg(points.map((p) => p.temp)));
+    const kpiHum = r1(avg(points.map((p) => p.hum)));
+
+    if (mode === "hourly") {
+        // bins 0..23
+        const bins = Array.from({ length: 24 }, () => ({ temp: [], hum: [] }));
+        for (const p of points) {
+            const h = p.dt.getUTCHours();
+            if (h < 0 || h > 23) continue;
+            bins[h].temp.push(p.temp);
+            bins[h].hum.push(p.hum);
+        }
+
+        const labels = Array.from({ length: 24 }, (_, i) => `${pad2(i)}:00`);
+        const tempArr = bins.map((b) => r1(avg(b.temp)));
+        const humArr = bins.map((b) => r1(avg(b.hum)));
+
+        const todaySGT = todaySgtISO();
+        const curHr = currentHourSgt();
+
+        // If user picked a future date => show nothing
+        if (thDate.value > todaySGT) {
+            return { labels: [], temp: [], hum: [], kpiTemp: 0, kpiHum: 0 };
+        }
+
+        // If user picked today => clip to current hour
+        if (thDate.value === todaySGT) {
+            const endIdx = curHr; // show up to this hour
+            return {
+                labels: labels.slice(0, endIdx + 1),
+                temp: tempArr.slice(0, endIdx + 1),
+                hum: humArr.slice(0, endIdx + 1),
+                kpiTemp,
+                kpiHum
+            };
+        }
+
+        // Past date => show full day
+        return { labels, temp: tempArr, hum: humArr, kpiTemp, kpiHum };
+
+    }
+
+    if (mode === "daily") {
+        return {
+            labels: [thDate.value],
+            temp: [Number.isFinite(kpiTemp) ? kpiTemp : 0],
+            hum: [Number.isFinite(kpiHum) ? kpiHum : 0],
+            kpiTemp: Number.isFinite(kpiTemp) ? kpiTemp : 0,
+            kpiHum: Number.isFinite(kpiHum) ? kpiHum : 0
+        };
+
+    }
+
+    if (mode === "weekly") {
+        // group by day
+        const byDay = groupByKey(points, (p) => isoDateSgt(p.dt));
+        const t = todaySgtISO();
+        let days = dateRangeISO(startDay, endDay);
+
+        // If this week includes today, clip future days
+        if (startDay <= t && t <= endDay) {
+            days = days.filter((d) => d <= t);
+        }
+
+        // If week is fully in the future, show nothing
+        if (startDay > t) {
+            return { labels: [], temp: [], hum: [], kpiTemp: 0, kpiHum: 0 };
+        }
+
+
+        const labels = [];
+        const temp = [];
+        const hum = [];
+
+        for (const d of days) {
+            const arr = byDay.get(d) || [];
+            labels.push(d);
+            temp.push(r1(avg(arr.map((x) => x.temp))));
+            hum.push(r1(avg(arr.map((x) => x.hum))));
+        }
+
+        return { labels, temp, hum, kpiTemp, kpiHum };
+    }
+
+    // monthly: Week 1..Week N (same style as your water monthly)
+    const weeks = weeksToShowForMonth(thMonth.value);
+    if (!weeks.length) return { labels: [], temp: [], hum: [], kpiTemp, kpiHum };
+
+    const byDay = groupByKey(points, (p) => isoDateSgt(p.dt));
+
+    const labels = [];
+    const temp = [];
+    const hum = [];
+
+    const selected = ymKey(thMonth.value);
+    const current = ymKey(currentMonthValSgt());
+    const t = todaySgtISO();
+    const isCurrentMonth = selected === current;
+
+    for (const w of weeks) {
+        const effectiveEnd = isCurrentMonth && w.start <= t && t <= w.end ? t : w.end;
+        const days = dateRangeISO(w.start, effectiveEnd);
+
+        const weekTemps = [];
+        const weekHums = [];
+
+        for (const d of days) {
+            const arr = byDay.get(d) || [];
+            for (const p of arr) {
+                weekTemps.push(p.temp);
+                weekHums.push(p.hum);
+            }
+        }
+
+        labels.push(w.label);
+        temp.push(r1(avg(weekTemps)));
+        hum.push(r1(avg(weekHums)));
+    }
+
+    return { labels, temp, hum, kpiTemp, kpiHum };
+}
+
+async function buildTHChart() {
+    if (!thCanvas.value) return;
+
+    thApiLoading.value = true;
+
+    try {
+        const { labels, temp, hum, kpiTemp, kpiHum } = await buildTHLineData();
+
+        // KPIs (keep both so Summary can switch instantly)
+        thKpiTemp.value = kpiTemp;
+        thKpiHum.value = kpiHum;
+
+        const showTemp = thMetric.value === "temp";
+
+        // Build ONLY 1 dataset depending on dropdown
+        const datasets = showTemp
+            ? [
+                {
+                    label: "Temperature (°C)",
+                    data: temp,
+                    yAxisID: "yTemp",
+                    tension: 0.25,
+                    pointRadius: 2
+                }
+            ]
+            : [
+                {
+                    label: "Humidity (%RH)",
+                    data: hum,
+                    yAxisID: "yHum",
+                    tension: 0.25,
+                    pointRadius: 2
+                }
+            ];
+
+        thChart?.destroy();
+        thChart = new Chart(thCanvas.value, {
+            type: "line",
+            data: { labels, datasets },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                interaction: { mode: "index", intersect: false },
+                scales: {
+                    // Only show relevant axis
+                    yTemp: showTemp
+                        ? {
+                            type: "linear",
+                            position: "left",
+                            min: 0,
+                            max: 40,
+                            title: { display: true, text: "°C" }
+                        }
+                        : { display: false },
+
+                    yHum: !showTemp
+                        ? {
+                            type: "linear",
+                            position: "left",
+                            min: 0,
+                            max: 100,
+                            title: { display: true, text: "%RH" },
+                            grid: {
+                                display: true,        // show guide lines
+                                drawBorder: true
+                            }
+                        }
+                        : { display: false }
+                }
+            }
+        });
+    } catch (e) {
+        console.error("buildTHChart failed:", e);
+        thKpiTemp.value = 0;
+        thKpiHum.value = 0;
+        thChart?.destroy();
+
+        // optional: draw empty chart so UI doesn't look broken
+        thChart = new Chart(thCanvas.value, {
+            type: "line",
+            data: { labels: [], datasets: [] },
+            options: { responsive: true, maintainAspectRatio: false }
+        });
+    } finally {
+        thApiLoading.value = false;
+    }
+}
+
+
+/** ---- add to unmount ---- **/
+onBeforeUnmount(() => {
+    thChart?.destroy();
+});
+
+
+/** ---- update mount ---- **/
+onMounted(async () => {
+    await store.load();
+    applyRoleDefaults();
+
+    await loadWaterDevices();
+    await loadTHDevices();
+
+    await refreshWaterKpis();
+    await buildWaterChart();
+    await buildTHChart();
+    buildGasChart();
+});
+
+/** ---- update export PNG ---- **/
+function exportSectionPng(utility) {
+    const chart =
+        utility === "water" ? waterChart :
+            utility === "gas" ? gasChart :
+                utility === "th" ? thChart :
+                    null;
+
+    if (!chart) return;
+    const a = document.createElement("a");
+    a.href = chart.toBase64Image();
+    a.download = `${utility}_${utility === "water" ? waterMode.value : utility === "gas" ? gasMode.value : thMode.value}.png`;
+    a.click();
+}
+
 /** ---- rounding ---- **/
 function r1(n) {
     return Math.round(Number(n) * 10) / 10;
@@ -295,7 +851,7 @@ function weeksOfMonthMondayBlocks(monthVal) {
 }
 function weeksToShowForMonth(monthVal) {
     const selected = ymKey(monthVal);
-    const current = ymKey(currentMonthVal());
+    const current = ymKey(currentMonthValSgt());
     const weeks = weeksOfMonthMondayBlocks(monthVal);
     if (weeks.length === 0) return [];
 
@@ -303,7 +859,7 @@ function weeksToShowForMonth(monthVal) {
     if (selected > current) return []; // future month => show none
 
     // current month => show weeks up to (and including) the current week
-    const t = todayISO();
+    const t = todaySgtISO();
     return weeks.filter((w) => w.start <= t);
 }
 
@@ -467,6 +1023,14 @@ function sumConsumption(rows) {
     for (const r of rows) t += Number(r.consumption || 0);
     return r1(t);
 }
+
+// Gateway UI placeholder (same pattern as Water; API doesn't use it)
+const TH_DEFAULT_GATEWAY_ID = "647fdafffe01f876";
+const thGateway = ref("");
+
+// Metric selector: show only ONE line at a time
+const thMetric = ref("temp"); // "temp" | "hum"
+
 
 /** ---- KPI labels ---- **/
 const waterWeekRangeLabel = computed(() => {
@@ -708,8 +1272,8 @@ async function buildWaterBarData() {
     const values = [];
 
     const selected = ymKey(waterMonth.value);
-    const current = ymKey(currentMonthVal());
-    const t = todayISO();
+    const current = ymKey(currentMonthValSgt());
+    const t = todaySgtISO();
     const isCurrentMonth = selected === current;
 
     for (const w of weeks) {
@@ -825,6 +1389,20 @@ watch([gasMode, gasTenant, gasGateway, gasDate, gasWeek, gasMonth], buildGasChar
 
 /** ---- export ---- **/
 async function exportSectionCsv(utility) {
+    if (utility === "th") {
+        const { labels, temp, hum } = await buildTHLineData();
+        const out = labels.map((p, i) => ({
+            utility: "temp_humidity",
+            mode: thMode.value,
+            device: thDeviceId.value || "ALL",
+            period: p,
+            temperature_c: temp[i],
+            humidity_rh: hum[i]
+        }));
+        exportToCsv(`temp_humidity_${thMode.value}_${thDeviceId.value || "ALL"}.csv`, out);
+        return;
+    }
+
     if (utility === "water") {
         const { labels, values } = await buildWaterBarData();
         const out = labels.map((p, i) => ({
@@ -861,18 +1439,16 @@ async function exportSectionCsv(utility) {
     exportToCsv(`${utility}_${gasMode.value}_${gasTenant.value || "ALL"}_${gasGateway.value || "ALL"}.csv`, out);
 }
 
-function exportSectionPng(utility) {
-    const chart = utility === "water" ? waterChart : gasChart;
-    if (!chart) return;
-    const a = document.createElement("a");
-    a.href = chart.toBase64Image();
-    a.download = `${utility}_${utility === "water" ? waterMode.value : gasMode.value}.png`;
-    a.click();
-}
-
 function printPage() {
     window.print();
 }
+
+watch(
+    [thMode, thDeviceId, thGateway, thMetric, thDate, thWeek, thMonth],
+    async () => {
+        await buildTHChart();
+    }
+);
 
 /** ---- mount ---- **/
 onMounted(async () => {
@@ -891,6 +1467,8 @@ onBeforeUnmount(() => {
     waterChart?.destroy();
     gasChart?.destroy();
 });
+
+
 </script>
 
 <style scoped>
@@ -1046,5 +1624,39 @@ onBeforeUnmount(() => {
 
 canvas {
     max-width: 100%;
+}
+
+.fullWidth {
+    width: 100%;
+}
+
+.thChartWrap {
+    height: 300px;
+    /* tweak if you want bigger */
+}
+
+/* TH: force filters into ONE row */
+.fullWidth .filters {
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+    align-items: end;
+}
+
+/* Make "Summary" look nice even if it needs more space */
+.fullWidth .filters .filter:last-child .input {
+    white-space: nowrap;
+}
+
+/* Responsive: 3 per row on medium screens */
+@media (max-width: 1400px) {
+    .fullWidth .filters {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+}
+
+/* Responsive: 2 per row on smaller screens */
+@media (max-width: 900px) {
+    .fullWidth .filters {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
 }
 </style>
