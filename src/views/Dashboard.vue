@@ -1676,21 +1676,47 @@ async function buildWaterChart() {
         waterChart?.destroy();
         waterChart = new Chart(waterCanvas.value, {
             type: "bar",
-            data: { labels, datasets: [{ label: "Water (m³)", data: values }] },
-            options: { responsive: true, maintainAspectRatio: false }
+            data: {
+                labels,
+                datasets: [
+                    {
+                        label: "Water (m³)",
+                        data: values,
+                        backgroundColor: "rgba(56, 142, 60, 0.6)", // green fill
+                        borderColor: "rgba(56, 142, 60, 1)",       // green border
+                        borderWidth: 1
+                    }
+                ]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false
+            }
         });
     } catch (e) {
         console.error("buildWaterChart failed:", e);
         waterChart?.destroy();
         waterChart = new Chart(waterCanvas.value, {
             type: "bar",
-            data: { labels: [], datasets: [{ label: "Water (m³)", data: [] }] },
+            data: {
+                labels: [],
+                datasets: [
+                    {
+                        label: "Water (m³)",
+                        data: [],
+                        backgroundColor: "rgba(56, 142, 60, 0.6)",
+                        borderColor: "rgba(56, 142, 60, 1)",
+                        borderWidth: 1
+                    }
+                ]
+            },
             options: { responsive: true, maintainAspectRatio: false }
         });
     } finally {
         waterApiLoading.value = false;
     }
 }
+
 
 function buildGasChart() {
     if (!gasCanvas.value) return;
