@@ -325,6 +325,21 @@ function todaySgtISO() {
     return `${y}-${m}-${dd}`;
 }
 
+const TEMP_COLOR = {
+    line: "rgba(102, 187, 106, 1)",      // light green
+    fill: "rgba(102, 187, 106, 0.2)",
+    point: "rgba(102, 187, 106, 1)"
+};
+
+
+const HUM_COLOR = {
+    line: "rgba(171, 71, 188, 1)",       // light purple
+    fill: "rgba(171, 71, 188, 0.2)",
+    point: "rgba(171, 71, 188, 1)"
+};
+
+
+
 function currentHourSgt() {
     const d = nowSgtDateObj();
     return d.getUTCHours(); // 0..23
@@ -703,24 +718,31 @@ async function buildTHChart() {
 
         // Build ONLY 1 dataset depending on dropdown
         const datasets = showTemp
-            ? [
-                {
-                    label: "Temperature (°C)",
-                    data: temp,
-                    yAxisID: "yTemp",
-                    tension: 0.25,
-                    pointRadius: 2
-                }
-            ]
-            : [
-                {
-                    label: "Humidity (%RH)",
-                    data: hum,
-                    yAxisID: "yHum",
-                    tension: 0.25,
-                    pointRadius: 2
-                }
-            ];
+            ? [{
+                label: "Temperature (°C)",
+                data: temp,
+                yAxisID: "yTemp",
+                tension: 0.25,
+                pointRadius: 3,
+                borderColor: TEMP_COLOR.line,
+                backgroundColor: TEMP_COLOR.fill,
+                pointBackgroundColor: TEMP_COLOR.point,
+                pointBorderColor: TEMP_COLOR.point,
+                fill: true
+            }]
+            : [{
+                label: "Humidity (%RH)",
+                data: hum,
+                yAxisID: "yHum",
+                tension: 0.25,
+                pointRadius: 3,
+                borderColor: HUM_COLOR.line,
+                backgroundColor: HUM_COLOR.fill,
+                pointBackgroundColor: HUM_COLOR.point,
+                pointBorderColor: HUM_COLOR.point,
+                fill: true
+            }];
+
 
         thChart?.destroy();
         thChart = new Chart(thCanvas.value, {
@@ -733,13 +755,7 @@ async function buildTHChart() {
                 scales: {
                     // Only show relevant axis
                     yTemp: showTemp
-                        ? {
-                            type: "linear",
-                            position: "left",
-                            min: 0,
-                            max: 40,
-                            title: { display: true, text: "°C" }
-                        }
+                        ? { type: "linear", position: "left", title: { display: true, text: "°C" } }
                         : { display: false },
 
                     yHum: !showTemp
