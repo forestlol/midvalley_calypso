@@ -5,12 +5,12 @@
             <div class="titleBlock">
                 <h2 class="title">KonaMicro Latest</h2>
                 <div class="sub">
-                    Status is OFFLINE if last update is older than 1 hour (timestamp shown as UTC+8).
+                    Status is OFFLINE if last update is older than 1 hour (device timestamps shown as UTC+8).
                 </div>
             </div>
 
             <div class="controls">
-                <!-- ONLY the refresh button is styled -->
+                <!-- Only refresh button styled -->
                 <button class="refreshBtn" @click="refreshAll" :disabled="loadingAny">
                     {{ loadingAny ? "Refreshing…" : "Refresh All" }}
                 </button>
@@ -50,7 +50,7 @@
                             <th>Gateway</th>
                             <th>FCount</th>
                             <th>Status</th>
-                            <th style="width: 110px">Actions</th>
+                            <th style="width:110px">Actions</th>
                         </tr>
                     </thead>
 
@@ -92,15 +92,17 @@
                 <div class="form">
                     <div class="field">
                         <label>Gateway ID</label>
-                        <input class="input" v-model="newGatewayId" placeholder="e.g. 647fdafffe01f876" />
+                        <input class="input" v-model="newGatewayId" />
                     </div>
 
                     <div class="field">
                         <label>Notes</label>
-                        <input class="input" v-model="newGatewayNote" placeholder="optional" />
+                        <input class="input" v-model="newGatewayNote" />
                     </div>
 
-                    <button class="btnPlain" @click="addGatewayLocal">Add (local)</button>
+                    <button class="btnPlain" @click="addGatewayLocal">
+                        Add (local)
+                    </button>
                 </div>
             </div>
 
@@ -142,7 +144,7 @@ let pollTimer = null;
 
 const lastRefreshedAt = ref(null);
 
-// gateways (local)
+// gateways (local only)
 const gateways = ref([]);
 const newGatewayId = ref("");
 const newGatewayNote = ref("");
@@ -176,11 +178,26 @@ function ensureRow(deviceId) {
     return rowMap[deviceId];
 }
 
-function formatUtcPlus8(ts) {
-    if (!ts) return null;
-    const d = new Date(ts);
+function formatUtcPlus8(dateObj) {
+    if (!dateObj) return null;
+    const d = new Date(dateObj);
     d.setHours(d.getHours() + 8);
     return d.toLocaleString("en-SG", {
+        year: "numeric",
+        month: "short",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+        hour12: false,
+    });
+}
+
+/**
+ * LAST REFRESH = local browser time (no offset)
+ */
+function formatLocalNow() {
+    return new Date().toLocaleString(undefined, {
         year: "numeric",
         month: "short",
         day: "2-digit",
@@ -230,7 +247,7 @@ async function refreshOne(deviceId) {
 
 async function refreshAll() {
     await Promise.all(deviceIds.value.map(refreshOne));
-    lastRefreshedAt.value = formatUtcPlus8(new Date());
+    lastRefreshedAt.value = formatLocalNow();
 }
 
 // polling

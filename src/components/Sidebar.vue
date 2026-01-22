@@ -37,12 +37,12 @@
                             </router-link>
                         </li>
 
-                        <li>
+                        <!-- <li>
                             <router-link to="/gateways" class="menu-link" @click="onLinkClick">
                                 <i class="fas fa-network-wired"></i>
                                 <span class="link-text">Gateways</span>
                             </router-link>
-                        </li>
+                        </li> -->
 
                         <li>
                             <router-link to="/gas" class="menu-link" @click="onLinkClick">
