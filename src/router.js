@@ -6,6 +6,7 @@ import Gateways from "./views/Gateways.vue";
 import GasConsumption from "./views/GasConsumption.vue";
 import Summary from "./views/Summary.vue";
 import Alarms from "./views/Alarms.vue";
+import TempSensor from "./views/TempSensor.vue";
 import { useAuth } from "./stores/auth";
 
 const routes = [
@@ -37,6 +38,12 @@ const routes = [
     path: "/summary",
     name: "Summary",
     component: Summary,
+    meta: { requiresAuth: true },
+  },
+  {
+    path: "/temp-sensor",
+    name: "TempSensor",
+    component: TempSensor,
     meta: { requiresAuth: true },
   },
   {

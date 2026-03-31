@@ -57,6 +57,7 @@
                                 <span class="link-text">Summary</span>
                             </router-link>
                         </li>
+
                     </template>
                 </ul>
             </div>

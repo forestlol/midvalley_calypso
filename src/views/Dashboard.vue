@@ -42,7 +42,6 @@
                 <div class="filter">
                     <div class="filterLabel">Device</div>
                     <select v-model="thDeviceId" class="input" :disabled="thDevices.length === 0">
-                        <option value="">All Devices</option>
                         <option v-for="id in thDevices" :key="id" :value="id">{{ id }}</option>
                     </select>
                 </div>
@@ -69,15 +68,17 @@
                 <div class="filter">
                     <div class="filterLabel">Period</div>
                     <input v-if="thMode === 'hourly' || thMode === 'daily'" v-model="thDate" type="date"
-                        class="input" />
-                    <input v-else-if="thMode === 'weekly'" v-model="thWeek" type="week" class="input" />
-                    <input v-else v-model="thMonth" type="month" class="input" />
+                        class="input" :max="thLatestDate" />
+                    <input v-else-if="thMode === 'weekly'" v-model="thWeek" type="week" class="input"
+                        :max="thLatestWeek" />
+                    <input v-else v-model="thMonth" type="month" class="input" :max="thLatestMonth" />
                 </div>
 
                 <!-- NEW: Metric selector (Temperature OR Humidity) -->
                 <div class="filter">
                     <div class="filterLabel">Metric</div>
                     <select v-model="thMetric" class="input">
+                        <option value="overall">Overall</option>
                         <option value="temp">Temperature (°C)</option>
                         <option value="hum">Humidity (%RH)</option>
                     </select>
@@ -89,8 +90,11 @@
                         <template v-if="thMetric === 'temp'">
                             <span><b>{{ thKpiTemp }}</b> °C</span>
                         </template>
-                        <template v-else>
+                        <template v-else-if="thMetric === 'hum'">
                             <span><b>{{ thKpiHum }}</b> %RH</span>
+                        </template>
+                        <template v-else>
+                            <span><b>{{ thKpiTemp }}</b> °C / <b>{{ thKpiHum }}</b> %RH</span>
                         </template>
                     </div>
                 </div>
@@ -153,11 +157,12 @@
                     </div>
 
                     <div class="filter">
-                        <div class="filterLabel">Period</div>
+                    <div class="filterLabel">Period</div>
                         <input v-if="waterMode === 'hourly' || waterMode === 'daily'" v-model="waterDate" type="date"
-                            class="input" />
-                        <input v-else-if="waterMode === 'weekly'" v-model="waterWeek" type="week" class="input" />
-                        <input v-else v-model="waterMonth" type="month" class="input" />
+                            class="input" :max="waterCurrentDisplayDate" />
+                        <input v-else-if="waterMode === 'weekly'" v-model="waterWeek" type="week" class="input"
+                            :max="waterCurrentWeek" />
+                        <input v-else v-model="waterMonth" type="month" class="input" :max="waterCurrentMonth" />
                     </div>
                 </div>
 
@@ -239,9 +244,11 @@
 
                     <div class="filter">
                         <div class="filterLabel">Period</div>
-                        <input v-if="gasMode === 'daily'" v-model="gasDate" type="date" class="input" />
-                        <input v-else-if="gasMode === 'weekly'" v-model="gasWeek" type="week" class="input" />
-                        <input v-else v-model="gasMonth" type="month" class="input" />
+                        <input v-if="gasMode === 'daily'" v-model="gasDate" type="date" class="input"
+                            :max="gasLatestDate" />
+                        <input v-else-if="gasMode === 'weekly'" v-model="gasWeek" type="week" class="input"
+                            :max="gasLatestWeek" />
+                        <input v-else v-model="gasMonth" type="month" class="input" :max="gasLatestMonth" />
                     </div>
                 </div>
 
@@ -270,6 +277,16 @@
                 </div>
             </section>
         </div>
+
+        <div v-if="showNoDataModal" class="modalBackdrop" @click.self="closeNoDataModal">
+            <div class="modalCard">
+                <div class="modalTitle">No Data</div>
+                <div class="modalText">{{ noDataMessage }}</div>
+                <div class="modalActions">
+                    <button class="btn" @click="closeNoDataModal">Close</button>
+                </div>
+            </div>
+        </div>
     </div>
 </template>
 
@@ -289,17 +306,21 @@ const lockedTenant = computed(() => (isNormalUser.value ? tenantName?.value || "
 /** ---------------------------
  * TEMP + HUM: devices + timeseries API
  * --------------------------**/
-const TH_DEVICES_URL = "https://midvalley-temperature.rshare.io/api/konamicro/devices?limit=200";
-const TH_TS_URL = "https://midvalley-temperature.rshare.io/api/konamicro/timeseries";
+const DEFAULT_TH_DEVICE_ID = "647FDA0000022695";
+const TH_DEVICES_URL = "https://midvalley-temperature.rshare.io/api/konamicro/temperature-sensors?enabled=true&limit=500";
+const TH_TS_URL = "https://midvalley-temperature.rshare.io/api/konamicro/temperature/timeseries";
 
 const thApiLoading = ref(false);
-const thDevices = ref([]);         // array of device ids (strings)
-const thDeviceId = ref("");        // "" = All Devices
+const thDevices = ref([]);
+const thDeviceId = ref(DEFAULT_TH_DEVICE_ID);
 
 const thMode = ref("hourly");
 const thDate = ref(todayISO());    // default today
-const thWeek = ref("2026-W03");    // you can overwrite after store.load if you want
+const thWeek = ref(isoDateToWeekValue(todayISO()));
 const thMonth = ref(currentMonthVal());
+const thLatestDate = ref(todaySgtISO());
+const thLatestWeek = computed(() => isoDateToWeekValue(completedDataCutoffISO(thLatestDate.value)));
+const thLatestMonth = computed(() => (thLatestDate.value || todaySgtISO()).slice(0, 7));
 
 const thKpiTemp = ref(0);
 const thKpiHum = ref(0);
@@ -408,13 +429,39 @@ async function loadTHDevices() {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
 
-        // data: { count, devices: [...] }
-        thDevices.value = Array.isArray(data?.devices) ? data.devices : [];
+        const ids = (Array.isArray(data?.sensors) ? data.sensors : [])
+            .map((sensor) => String(sensor?.device_id || "").trim())
+            .filter(Boolean);
+
+        thDevices.value = ids;
+        thDeviceId.value = ids.includes(thDeviceId.value)
+            ? thDeviceId.value
+            : (ids.includes(DEFAULT_TH_DEVICE_ID) ? DEFAULT_TH_DEVICE_ID : (ids[0] || ""));
     } catch (e) {
         console.error("loadTHDevices failed:", e);
-        thDevices.value = [];
+        thDevices.value = DEFAULT_TH_DEVICE_ID ? [DEFAULT_TH_DEVICE_ID] : [];
+        thDeviceId.value = DEFAULT_TH_DEVICE_ID;
     } finally {
         thApiLoading.value = false;
+    }
+}
+
+async function loadTHLatestDate() {
+    const endDay = todaySgtISO();
+    const startDay = addDaysISO(endDay, -90);
+    const deviceId = thDeviceId.value || thDevices.value[0] || DEFAULT_TH_DEVICE_ID;
+
+    try {
+        const points = await fetchTHTimeseries(deviceId, startDay, endDay, 200000);
+        let latest = "";
+        for (const point of points) {
+            const day = isoDateSgt(point.dt);
+            if (!latest || day > latest) latest = day;
+        }
+        thLatestDate.value = latest || todaySgtISO();
+    } catch (e) {
+        console.error("loadTHLatestDate failed:", e);
+        thLatestDate.value = todaySgtISO();
     }
 }
 
@@ -432,26 +479,23 @@ async function fetchTHTimeseries(deviceId, startDay, endDay, limit = 5000) {
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
 
-    const series = data?.series || {};
-    const ts = Array.isArray(series.ts) ? series.ts : [];
-    const temperature = Array.isArray(series.temperature_c) ? series.temperature_c : [];
-    const humidity = Array.isArray(series.humidity_rh) ? series.humidity_rh : [];
+    const items = Array.isArray(data?.items) ? data.items : [];
+    
 
     const points = [];
-    const n = Math.min(ts.length, temperature.length, humidity.length);
-    for (let i = 0; i < n; i++) {
-        const t = ts[i];
-        const temp = Number(temperature[i]);
-        const hum = Number(humidity[i]);
+    for (const item of items) {
+        const t = String(item?.hour_bucket_sgt || "").trim();
+        const temp = Number(item?.ambient_temperature);
+        const hum = Number(item?.relative_humidity);
         if (!t) continue;
         if (!Number.isFinite(temp) || !Number.isFinite(hum)) continue;
 
         // NOTE: API ts has no timezone; browser treats it as local time, which is fine for SG usage.
         // API ts is UTC without timezone → force UTC, then add +8 hours (SGT)
-        const dtUtc = new Date(`${t}Z`);
-        if (Number.isNaN(dtUtc.getTime())) continue;
+        const dtSgt = new Date(t);
+        if (Number.isNaN(dtSgt.getTime())) continue;
 
-        const dt = new Date(dtUtc.getTime() + 8 * 60 * 60 * 1000);
+        const dt = new Date(dtSgt.getTime() + SGT_OFFSET_MS);
 
         points.push({ dt, temp, hum });
 
@@ -493,23 +537,17 @@ function isoDateSgt(dt) {
 }
 
 async function getTHPointsForSelection(startDay, endDay) {
-    const isAll = !thDeviceId.value;
-    const ids = isAll ? (thDevices.value || []) : [thDeviceId.value];
-    if (!ids.length) return [];
+    const deviceId = thDeviceId.value || DEFAULT_TH_DEVICE_ID;
+    if (!deviceId) return [];
 
-    const results = await Promise.all(
-        ids.map(async (id) => {
-            try {
-                return await fetchTHTimeseries(id, startDay, endDay, 5000);
-            } catch (e) {
-                console.warn("TH device fetch failed:", id, e);
-                return [];
-            }
-        })
-    );
+    try {
+        return await fetchTHTimeseries(deviceId, startDay, endDay, 200000);
+    } catch (e) {
+        console.warn("TH device fetch failed:", deviceId, e);
+        return [];
+    }
 
     // merge all devices’ points
-    return results.flat();
 }
 
 async function buildTHLineData() {
@@ -529,19 +567,10 @@ async function buildTHLineData() {
         // Group points by date (SGT)
         const byDay = groupByKey(points, (p) => isoDateSgt(p.dt));
 
-        const t = todaySgtISO();
-        let days = dateRangeISO(startDay, endDay);
-
-        // If this week includes today, do not show days after today
-        if (startDay <= t && t <= endDay) {
-            days = days.filter((d) => d <= t);
+        const days = completedWeekDays(startDay, endDay, thLatestDate.value);
+        if (!days.length) {
+            return { labels: [], temp: [], hum: [], kpiTemp: 0, kpiHum: 0, hasData: false };
         }
-
-        // If the whole week is in the future, show nothing
-        if (startDay > t) {
-            return { labels: [], temp: [], hum: [], kpiTemp: 0, kpiHum: 0 };
-        }
-
 
         const labels = [];
         const temp = [];
@@ -558,7 +587,7 @@ async function buildTHLineData() {
         const kpiTemp = points.length ? r1(avg(points.map((p) => p.temp))) : 0;
         const kpiHum = points.length ? r1(avg(points.map((p) => p.hum))) : 0;
 
-        return { labels, temp, hum, kpiTemp, kpiHum };
+        return { labels, temp, hum, kpiTemp, kpiHum, hasData: labels.length > 0 };
     }
     else if (mode === "monthly") {
         startDay = monthStartISO(thMonth.value);
@@ -567,15 +596,13 @@ async function buildTHLineData() {
 
     const points = await getTHPointsForSelection(startDay, endDay);
     if (!points.length) {
-        const labels = Array.from({ length: 24 }, (_, i) => `${pad2(i)}:00`);
-        const zeros = Array(24).fill(0);
-
         return {
-            labels,
-            temp: zeros,
-            hum: zeros,
+            labels: [],
+            temp: [],
+            hum: [],
             kpiTemp: 0,
-            kpiHum: 0
+            kpiHum: 0,
+            hasData: false
         };
     }
 
@@ -602,7 +629,7 @@ async function buildTHLineData() {
 
         // If user picked a future date => show nothing
         if (thDate.value > todaySGT) {
-            return { labels: [], temp: [], hum: [], kpiTemp: 0, kpiHum: 0 };
+            return { labels: [], temp: [], hum: [], kpiTemp: 0, kpiHum: 0, hasData: false };
         }
 
         // If user picked today => clip to current hour
@@ -613,12 +640,13 @@ async function buildTHLineData() {
                 temp: tempArr.slice(0, endIdx + 1),
                 hum: humArr.slice(0, endIdx + 1),
                 kpiTemp,
-                kpiHum
+                kpiHum,
+                hasData: true
             };
         }
 
         // Past date => show full day
-        return { labels, temp: tempArr, hum: humArr, kpiTemp, kpiHum };
+        return { labels, temp: tempArr, hum: humArr, kpiTemp, kpiHum, hasData: true };
 
     }
 
@@ -628,7 +656,8 @@ async function buildTHLineData() {
             temp: [Number.isFinite(kpiTemp) ? kpiTemp : 0],
             hum: [Number.isFinite(kpiHum) ? kpiHum : 0],
             kpiTemp: Number.isFinite(kpiTemp) ? kpiTemp : 0,
-            kpiHum: Number.isFinite(kpiHum) ? kpiHum : 0
+            kpiHum: Number.isFinite(kpiHum) ? kpiHum : 0,
+            hasData: true
         };
 
     }
@@ -636,19 +665,10 @@ async function buildTHLineData() {
     if (mode === "weekly") {
         // group by day
         const byDay = groupByKey(points, (p) => isoDateSgt(p.dt));
-        const t = todaySgtISO();
-        let days = dateRangeISO(startDay, endDay);
-
-        // If this week includes today, clip future days
-        if (startDay <= t && t <= endDay) {
-            days = days.filter((d) => d <= t);
+        const days = completedWeekDays(startDay, endDay, thLatestDate.value);
+        if (!days.length) {
+            return { labels: [], temp: [], hum: [], kpiTemp: 0, kpiHum: 0, hasData: false };
         }
-
-        // If week is fully in the future, show nothing
-        if (startDay > t) {
-            return { labels: [], temp: [], hum: [], kpiTemp: 0, kpiHum: 0 };
-        }
-
 
         const labels = [];
         const temp = [];
@@ -661,12 +681,12 @@ async function buildTHLineData() {
             hum.push(r1(avg(arr.map((x) => x.hum))));
         }
 
-        return { labels, temp, hum, kpiTemp, kpiHum };
+        return { labels, temp, hum, kpiTemp, kpiHum, hasData: labels.length > 0 };
     }
 
     // monthly: Week 1..Week N (same style as your water monthly)
     const weeks = weeksToShowForMonth(thMonth.value);
-    if (!weeks.length) return { labels: [], temp: [], hum: [], kpiTemp, kpiHum };
+    if (!weeks.length) return { labels: [], temp: [], hum: [], kpiTemp, kpiHum, hasData: false };
 
     const byDay = groupByKey(points, (p) => isoDateSgt(p.dt));
 
@@ -699,7 +719,7 @@ async function buildTHLineData() {
         hum.push(r1(avg(weekHums)));
     }
 
-    return { labels, temp, hum, kpiTemp, kpiHum };
+    return { labels, temp, hum, kpiTemp, kpiHum, hasData: labels.length > 0 };
 }
 
 async function buildTHChart() {
@@ -708,17 +728,19 @@ async function buildTHChart() {
     thApiLoading.value = true;
 
     try {
-        const { labels, temp, hum, kpiTemp, kpiHum } = await buildTHLineData();
+        const { labels, temp, hum, kpiTemp, kpiHum, hasData } = await buildTHLineData();
 
         // KPIs (keep both so Summary can switch instantly)
         thKpiTemp.value = kpiTemp;
         thKpiHum.value = kpiHum;
 
-        const showTemp = thMetric.value === "temp";
+        if (!hasData) openNoDataModal(thMode.value);
 
-        // Build ONLY 1 dataset depending on dropdown
-        const datasets = showTemp
-            ? [{
+        const showTemp = thMetric.value === "overall" || thMetric.value === "temp";
+        const showHum = thMetric.value === "overall" || thMetric.value === "hum";
+
+        const datasets = [
+            showTemp ? {
                 label: "Temperature (°C)",
                 data: temp,
                 yAxisID: "yTemp",
@@ -729,8 +751,8 @@ async function buildTHChart() {
                 pointBackgroundColor: TEMP_COLOR.point,
                 pointBorderColor: TEMP_COLOR.point,
                 fill: true
-            }]
-            : [{
+            } : null,
+            showHum ? {
                 label: "Humidity (%RH)",
                 data: hum,
                 yAxisID: "yHum",
@@ -741,7 +763,8 @@ async function buildTHChart() {
                 pointBackgroundColor: HUM_COLOR.point,
                 pointBorderColor: HUM_COLOR.point,
                 fill: true
-            }];
+            } : null
+        ].filter(Boolean);
 
 
         thChart?.destroy();
@@ -755,10 +778,10 @@ async function buildTHChart() {
                 scales: {
                     // Only show relevant axis
                     yTemp: showTemp
-                        ? { type: "linear", position: "left", title: { display: true, text: "°C" } }
+                        ? { type: "linear", position: showHum ? "right" : "left", title: { display: true, text: "°C" } }
                         : { display: false },
 
-                    yHum: !showTemp
+                    yHum: showHum
                         ? {
                             type: "linear",
                             position: "left",
@@ -802,9 +825,13 @@ onBeforeUnmount(() => {
 onMounted(async () => {
     await store.load();
     applyRoleDefaults();
+    resolveLatestGasDate();
 
     await loadWaterDevices();
+    resolveLatestWaterDate();
     await loadTHDevices();
+    await loadTHLatestDate();
+    applyLatestPeriodDefaults();
 
     await refreshWaterKpis();
     await buildWaterChart();
@@ -845,6 +872,14 @@ function endOfWeekISO(dateStr) {
     d.setDate(d.getDate() + 6);
     return d.toISOString().slice(0, 10);
 }
+function addDaysISO(dateStr, days) {
+    const [y, m, d] = String(dateStr || "").split("-").map(Number);
+    if (!Number.isFinite(y) || !Number.isFinite(m) || !Number.isFinite(d)) return "";
+
+    const dt = new Date(Date.UTC(y, m - 1, d));
+    dt.setUTCDate(dt.getUTCDate() + days);
+    return dt.toISOString().slice(0, 10);
+}
 function dateRangeISO(start, end) {
     const out = [];
     let d = new Date(start);
@@ -870,6 +905,20 @@ function isoWeekToMonday(weekVal) {
     targetMonday.setUTCDate(week1Monday.getUTCDate() + (week - 1) * 7);
 
     return targetMonday.toISOString().slice(0, 10);
+}
+function isoDateToWeekValue(dateStr) {
+    const [y, m, d] = String(dateStr || "").split("-").map(Number);
+    if (!Number.isFinite(y) || !Number.isFinite(m) || !Number.isFinite(d)) return "";
+
+    const date = new Date(Date.UTC(y, m - 1, d));
+    const day = date.getUTCDay() || 7;
+    date.setUTCDate(date.getUTCDate() + 4 - day);
+
+    const isoYear = date.getUTCFullYear();
+    const yearStart = new Date(Date.UTC(isoYear, 0, 1));
+    const weekNo = Math.ceil((((date - yearStart) / 86400000) + 1) / 7);
+
+    return `${isoYear}-W${String(weekNo).padStart(2, "0")}`;
 }
 function monthStartISO(monthVal) {
     return `${monthVal}-01`;
@@ -936,8 +985,32 @@ function weeksToShowForMonth(monthVal) {
     return weeks.filter((w) => w.start <= t);
 }
 
+function completedDataCutoffISO(latestDate) {
+    const today = todaySgtISO();
+    if (!latestDate) return addDaysISO(today, -1);
+    return latestDate >= today ? addDaysISO(today, -1) : latestDate;
+}
+
+function completedWeekDays(start, end, latestDate) {
+    const cutoff = completedDataCutoffISO(latestDate);
+    if (!cutoff || cutoff < start) return [];
+
+    return dateRangeISO(start, cutoff < end ? cutoff : end);
+}
+
 /** ---- store ---- **/
 const store = useSiteStore();
+const showNoDataModal = ref(false);
+const noDataMessage = ref("");
+
+function openNoDataModal(mode) {
+    noDataMessage.value = `No data for the selected ${mode} period.`;
+    showNoDataModal.value = true;
+}
+
+function closeNoDataModal() {
+    showNoDataModal.value = false;
+}
 
 /** ---- gas tenant options ---- **/
 const tenantOptions = computed(() => {
@@ -958,18 +1031,41 @@ const waterGateway = ref(""); // "" = All Gateways, or WATER_DEFAULT_GATEWAY_ID
 const waterApiLoading = ref(false);
 const waterDevices = ref([]);
 const waterDeviceId = ref(""); // "" = All Tenants, or selected device_id
+const waterCurrentDate = computed(() => todaySgtISO());
+const waterCurrentDisplayDate = computed(() => addDaysISO(todaySgtISO(), -1));
+const waterCurrentWeek = computed(() => isoDateToWeekValue(todaySgtISO()));
+const waterCurrentMonth = computed(() => currentMonthValSgt());
+const waterLatestDate = ref(todaySgtISO());
+const waterLatestWeek = computed(() => isoDateToWeekValue(completedDataCutoffISO(waterLatestDate.value)));
+const waterLatestMonth = computed(() => (waterLatestDate.value || todaySgtISO()).slice(0, 7));
 
 const WATER_FETCH_LIMIT = 1000;
 const waterDailyCache = new Map();
 
 async function fetchWaterDaily(deviceId, startDay, endDay, limit = WATER_FETCH_LIMIT, sort = "desc") {
     const key = `${deviceId}|${startDay}|${endDay}|${limit}|${sort}`;
-    if (waterDailyCache.has(key)) return waterDailyCache.get(key);
+    if (waterDailyCache.has(key)) {
+        console.log("[Water API] cache hit", {
+            deviceId,
+            startDay,
+            endDay,
+            limit,
+            sort
+        });
+        return waterDailyCache.get(key);
+    }
 
     const url = `${WATER_DAILY_BASE}/${encodeURIComponent(deviceId)}?start_day=${encodeURIComponent(
         startDay
     )}&end_day=${encodeURIComponent(endDay)}&limit=${encodeURIComponent(limit)}&sort=${encodeURIComponent(sort)}`;
 
+    console.log("[Water API] GET", url, {
+        deviceId,
+        startDay,
+        endDay,
+        limit,
+        sort
+    });
     const res = await fetch(url);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
@@ -982,6 +1078,7 @@ async function fetchWaterDaily(deviceId, startDay, endDay, limit = WATER_FETCH_L
 async function loadWaterDevices() {
     waterApiLoading.value = true;
     try {
+        console.log("[Water API] GET", DEVICES_URL);
         const res = await fetch(DEVICES_URL);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
@@ -1034,28 +1131,58 @@ function hourlyUsageBuckets(readings) {
 
 /** ---- WATER state ---- **/
 const waterMode = ref("weekly");
-const waterDate = ref("2026-01-16");
-const waterWeek = ref("2026-W03");
-const waterMonth = ref("2026-01");
+const waterDate = ref(todaySgtISO());
+const waterWeek = ref(isoDateToWeekValue(todaySgtISO()));
+const waterMonth = ref(currentMonthValSgt());
 
 /** ---- GAS state (existing dataset) ---- **/
 const gasMode = ref("weekly");
 const gasTenant = ref("");
 const gasGateway = ref("");
-const gasDate = ref("2025-11-01");
-const gasWeek = ref("2025-W45");
-const gasMonth = ref("2025-11");
+const gasDate = ref(todaySgtISO());
+const gasWeek = ref(isoDateToWeekValue(todaySgtISO()));
+const gasMonth = ref(currentMonthValSgt());
+const gasLatestDate = ref(todaySgtISO());
+const gasLatestWeek = computed(() => isoDateToWeekValue(completedDataCutoffISO(gasLatestDate.value)));
+const gasLatestMonth = computed(() => (gasLatestDate.value || todaySgtISO()).slice(0, 7));
 
 /** ---- role defaults ---- **/
 function applyRoleDefaults() {
-    if (store.meta?.start_date) gasDate.value = store.meta.start_date;
-    if (store.meta?.default_week) gasWeek.value = store.meta.default_week;
-    if (store.meta?.default_month) gasMonth.value = store.meta.default_month;
-
     if (isNormalUser.value) {
         gasTenant.value = lockedTenant.value;
         gasGateway.value = "";
     }
+}
+
+function resolveLatestGasDate() {
+    let latest = store.meta?.end_date || "";
+    for (const row of meterDailyGas.value) {
+        if (row?.date && (!latest || row.date > latest)) latest = row.date;
+    }
+    gasLatestDate.value = latest || todaySgtISO();
+}
+
+function resolveLatestWaterDate() {
+    let latest = "";
+    for (const device of waterDevices.value || []) {
+        const day = String(device?.updated_at || device?.last_seen_at || "").slice(0, 10);
+        if (day && (!latest || day > latest)) latest = day;
+    }
+    waterLatestDate.value = latest || todaySgtISO();
+}
+
+function applyLatestPeriodDefaults() {
+    thDate.value = thLatestDate.value;
+    thWeek.value = thLatestWeek.value;
+    thMonth.value = thLatestMonth.value;
+
+    waterDate.value = waterCurrentDisplayDate.value;
+    waterWeek.value = waterCurrentWeek.value;
+    waterMonth.value = waterCurrentMonth.value;
+
+    gasDate.value = gasLatestDate.value;
+    gasWeek.value = gasLatestWeek.value;
+    gasMonth.value = gasLatestMonth.value;
 }
 
 /** ---- GAS computed ---- **/
@@ -1101,8 +1228,7 @@ function sumConsumption(rows) {
 const TH_DEFAULT_GATEWAY_ID = "647fdafffe01f876";
 const thGateway = ref("");
 
-// Metric selector: show only ONE line at a time
-const thMetric = ref("temp"); // "temp" | "hum"
+const thMetric = ref("overall"); // "overall" | "temp" | "hum"
 
 
 /** ---- KPI labels ---- **/
@@ -1258,12 +1384,12 @@ async function refreshWaterKpis() {
         {
             const start = isoWeekToMonday(waterWeek.value);
             const end = endOfWeekISO(start);
+            const days = completedWeekDays(start, end, waterLatestDate.value);
 
             const dayToUsage = isAll
                 ? await getUsageMapAllTenants(start, end)
                 : await fetchUsageMapForDevice(waterDeviceId.value, start, end);
 
-            const days = dateRangeISO(start, end);
             let total = 0;
             for (const d of days) total += Number(dayToUsage.get(d) || 0);
             waterKpiWeekly.value = r1(total);
@@ -1286,8 +1412,7 @@ const gasKpiDaily = computed(() => {
 });
 const gasKpiWeekly = computed(() => {
     const start = isoWeekToMonday(gasWeek.value);
-    const end = endOfWeekISO(start);
-    const days = dateRangeISO(start, end);
+    const days = completedWeekDays(start, endOfWeekISO(start), gasLatestDate.value);
     return sumConsumption(
         filterRowsGas({ utility: "gas", tenant: gasTenant.value, gateway: gasGateway.value, dates: new Set(days) })
     );
@@ -1540,7 +1665,7 @@ async function buildWaterCumulativeSeries() {
 /** ---- WATER chart data ---- **/
 async function buildWaterBarData() {
     const mode = waterMode.value;
-    if (!waterDevices.value?.length) return { labels: [], values: [] };
+    if (!waterDevices.value?.length) return { labels: [], values: [], hasData: false };
     const isAll = !waterDeviceId.value;
 
     if (mode === "hourly") {
@@ -1553,38 +1678,42 @@ async function buildWaterBarData() {
                     try {
                         const arr = await fetchWaterDaily(id, waterDate.value, waterDate.value);
                         const row = arr?.find((x) => x?.day === waterDate.value) || arr?.[0];
-                        return hourlyUsageBuckets(row?.readings || []);
+                        return {
+                            hasData: !!row,
+                            values: hourlyUsageBuckets(row?.readings || [])
+                        };
                     } catch (e) {
                         console.warn("Hourly device failed:", id, e);
-                        return Array(24).fill(0);
+                        return { hasData: false, values: Array(24).fill(0) };
                     }
                 })
             );
 
             const summed = Array(24).fill(0);
             for (const buckets of perDeviceBuckets) {
-                for (let i = 0; i < 24; i++) summed[i] += Number(buckets?.[i] || 0);
+                for (let i = 0; i < 24; i++) summed[i] += Number(buckets?.values?.[i] || 0);
             }
 
             const values = summed.map(r1);
-            return { labels, values };
+            return { labels, values, hasData: perDeviceBuckets.some((b) => b.hasData) };
         }
 
         const arr = await fetchWaterDaily(waterDeviceId.value, waterDate.value, waterDate.value);
         const row = arr?.find((x) => x?.day === waterDate.value) || arr?.[0];
         const values = hourlyUsageBuckets(row?.readings || []);
-        return { labels, values };
+        return { labels, values, hasData: !!row };
     }
 
     if (mode === "daily") {
         if (isAll) {
             const map = await getUsageMapAllTenants(waterDate.value, waterDate.value);
             const v = r1(map.get(waterDate.value) || 0);
-            return { labels: [waterDate.value], values: [v] };
+            return { labels: [waterDate.value], values: [v], hasData: map.has(waterDate.value) };
         }
 
         const v = await getWaterDailyUsage(waterDeviceId.value, waterDate.value);
-        return { labels: [waterDate.value], values: [v] };
+        const map = await fetchUsageMapForDevice(waterDeviceId.value, waterDate.value, waterDate.value);
+        return { labels: [waterDate.value], values: [v], hasData: map.has(waterDate.value) };
     }
 
     if (mode === "weekly") {
@@ -1595,7 +1724,7 @@ async function buildWaterBarData() {
             ? await getUsageMapAllTenants(start, end)
             : await fetchUsageMapForDevice(waterDeviceId.value, start, end);
 
-        const days = dateRangeISO(start, end);
+        const days = completedWeekDays(start, end, waterLatestDate.value);
         const labels = [];
         const values = [];
         for (const d of days) {
@@ -1603,12 +1732,12 @@ async function buildWaterBarData() {
             values.push(r1(dayToUsage.get(d) || 0));
         }
 
-        return { labels, values };
+        return { labels, values, hasData: days.some((d) => dayToUsage.has(d)) };
     }
 
     // Monthly: Week 1..Week N (include current week); partial-sum current week up to today
     const weeks = weeksToShowForMonth(waterMonth.value);
-    if (weeks.length === 0) return { labels: [], values: [] };
+    if (weeks.length === 0) return { labels: [], values: [], hasData: false };
 
     const monthStart = monthStartISO(waterMonth.value);
     const monthEnd = monthEndISO(waterMonth.value);
@@ -1624,41 +1753,47 @@ async function buildWaterBarData() {
     const current = ymKey(currentMonthValSgt());
     const t = todaySgtISO();
     const isCurrentMonth = selected === current;
+    let hasData = false;
 
     for (const w of weeks) {
         const effectiveEnd = isCurrentMonth && w.start <= t && t <= w.end ? t : w.end;
         const days = dateRangeISO(w.start, effectiveEnd);
 
         let sum = 0;
-        for (const d of days) sum += Number(dayToUsage.get(d) || 0);
+        for (const d of days) {
+            if (dayToUsage.has(d)) hasData = true;
+            sum += Number(dayToUsage.get(d) || 0);
+        }
 
         labels.push(w.label);
         values.push(r1(sum));
     }
 
-    return { labels, values };
+    return { labels, values, hasData };
 }
 
 /** ---- GAS chart data (existing) ---- **/
 function buildGasBarData({ utility, mode, tenant, gateway, date, week, month }) {
     const labels = [];
     const values = [];
+    let hasData = false;
 
     if (mode === "daily") {
         const rows = filterRowsGas({ utility, tenant, gateway, dates: new Set([date]) });
         labels.push(date);
         values.push(sumConsumption(rows));
+        hasData = rows.length > 0;
     }
 
     if (mode === "weekly") {
         const start = isoWeekToMonday(week);
-        const end = endOfWeekISO(start);
-        const days = dateRangeISO(start, end);
+        const days = completedWeekDays(start, endOfWeekISO(start), gasLatestDate.value);
 
         for (const d of days) {
             const rows = filterRowsGas({ utility, tenant, gateway, dates: new Set([d]) });
             labels.push(d);
             values.push(sumConsumption(rows));
+            if (rows.length) hasData = true;
         }
     }
 
@@ -1675,10 +1810,11 @@ function buildGasBarData({ utility, mode, tenant, gateway, date, week, month }) 
             const rows = filterRowsGas({ utility, tenant, gateway, dates: new Set([d]) });
             labels.push(d);
             values.push(sumConsumption(rows));
+            if (rows.length) hasData = true;
         }
     }
 
-    return { labels, values };
+    return { labels, values, hasData };
 }
 
 /** ---- chart builders ---- **/
@@ -1687,7 +1823,9 @@ async function buildWaterChart() {
 
     waterApiLoading.value = true;
     try {
-        const { labels, values } = await buildWaterBarData();
+        const { labels, values, hasData } = await buildWaterBarData();
+
+        if (!hasData) openNoDataModal(waterMode.value);
 
         waterChart?.destroy();
         waterChart = new Chart(waterCanvas.value, {
@@ -1737,7 +1875,7 @@ async function buildWaterChart() {
 function buildGasChart() {
     if (!gasCanvas.value) return;
 
-    const { labels, values } = buildGasBarData({
+    const { labels, values, hasData } = buildGasBarData({
         utility: "gas",
         mode: gasMode.value,
         tenant: gasTenant.value,
@@ -1746,6 +1884,8 @@ function buildGasChart() {
         week: gasWeek.value,
         month: gasMonth.value
     });
+
+    if (!hasData) openNoDataModal(gasMode.value);
 
     gasChart?.destroy();
     gasChart = new Chart(gasCanvas.value, {
@@ -1829,18 +1969,6 @@ watch(
         await buildTHChart();
     }
 );
-
-/** ---- mount ---- **/
-onMounted(async () => {
-    await store.load();
-    applyRoleDefaults();
-
-    await loadWaterDevices();
-
-    await refreshWaterKpis();
-    await buildWaterChart();
-    buildGasChart();
-});
 
 /** ---- destroy ---- **/
 onBeforeUnmount(() => {
@@ -2042,6 +2170,43 @@ canvas {
 
 .sectionKpis.waterKpis4 {
     grid-template-columns: repeat(4, 1fr);
+}
+
+.modalBackdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(47, 53, 66, 0.45);
+    display: grid;
+    place-items: center;
+    padding: 16px;
+    z-index: 1000;
+}
+
+.modalCard {
+    width: min(420px, 100%);
+    background: #fff;
+    border-radius: 16px;
+    padding: 20px;
+    border: 1px solid #e1e4ea;
+    box-shadow: 0 18px 40px rgba(47, 53, 66, 0.18);
+}
+
+.modalTitle {
+    font-size: 20px;
+    font-weight: 800;
+    color: #2f3542;
+}
+
+.modalText {
+    margin-top: 10px;
+    color: #5b6474;
+    line-height: 1.5;
+}
+
+.modalActions {
+    display: flex;
+    justify-content: flex-end;
+    margin-top: 16px;
 }
 
 @media (max-width: 1200px) {
